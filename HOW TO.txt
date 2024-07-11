@@ -1,0 +1,129 @@
+project_root/
+├── database_connection/
+│   ├── __init__.py
+│   ├── base_database.py
+│   ├── database_factory.py
+│   ├── mongodb_database.py
+│   ├── ssh_tunnel.py
+│   ├── mysql_database.py
+│   ├── postgresql_database.py
+│   ├── sqlite_database.py
+│   ├── sqlserver_database.py
+│   ├── oracle_database.py
+├── main.py
+
+---------------------------------------------------------------------------------------------
+
+# SQL Server example
+sqlserver_config = {
+    'login': 'talend_user',
+    'password': 'Pass#1234',
+    'server': '192.168.81.150',
+    'port': '1433',
+    'database': 'DMCAS',
+    'additional_params': 'Encrypt=no;TrustServerCertificate=yes;Connection Timeout=30;'
+}
+sqlserver_db = DatabaseFactory.get_database('sqlserver', sqlserver_config)
+sqlserver_db.connect()
+sqlserver_result = sqlserver_db.execute_query("SELECT * FROM clientes_empresarias")
+print("SQL Server result:", sqlserver_result)
+sqlserver_db.disconnect()
+
+---------------------------------------------------------------------------------------------
+
+# MySQL example
+mysql_config = {
+    'user': 'root2',
+    'password': 'root2',
+    'host': '127.0.0.1',
+    'database': 'classicmodels'
+}
+mysql_db = DatabaseFactory.get_database('mysql', mysql_config)
+mysql_db.connect()
+mysql_result = mysql_db.execute_query("SELECT * FROM employees")
+print("MySQL result:", mysql_result)
+mysql_db.disconnect()
+
+---------------------------------------------------------------------------------------------
+
+# Oracle example
+oracle_config = {
+    'user': 'user_job_cvt',
+    'password': 'job#CVT#2014',
+    'host': '10.16.10.101',
+    'port': 1537,
+    'sid': 'CVTSPRD1'
+}
+oracle_db = DatabaseFactory.get_database('oracle', oracle_config)
+oracle_db.connect()
+oracle_result = oracle_db.execute_query("SELECT * FROM SIEBEL.TIMELINE")
+print("Oracle result:", oracle_result)
+oracle_db.disconnect()
+
+---------------------------------------------------------------------------------------------
+
+# PostgreSQL example
+postgresql_config = {
+    'user': 'postgres',
+    'password': 'Pa$$w0rd123?PrdQwe',
+    'host': '192.168.87.27',
+    'dbname': 'db_contact'
+}
+postgresql_db = DatabaseFactory.get_database('postgresql', postgresql_config)
+postgresql_db.connect()
+postgresql_result = postgresql_db.execute_query("SELECT * FROM tbl_contact")
+print("PostgreSQL result:", postgresql_result)
+postgresql_db.disconnect()
+
+---------------------------------------------------------------------------------------------
+
+# SQLite example
+sqlite_config = {'database': 'test_db.sqlite'}
+sqlite_db = DatabaseFactory.get_database('sqlite', sqlite_config)
+sqlite_db.connect()
+# Insert a line into the SQLite table
+sqlite_db.execute_query("INSERT INTO test_table (name, age) VALUES (?, ?)", ("John Doe", 30))
+sqlite_result = sqlite_db.execute_query("SELECT * FROM test_table")
+print("SQLite result:", sqlite_result)
+sqlite_db.disconnect()
+
+---------------------------------------------------------------------------------------------
+
+# MongoDB example without SSH tunnel
+mongodb_config_without_ssh = {
+    'host': 'localhost',
+    'port': 27017,
+    'database': 'mobiledata_db',
+    'collection': 'test_db'
+}
+mongodb_db_without_ssh = DatabaseFactory.get_database('mongodb', mongodb_config_without_ssh)
+mongodb_db_without_ssh.connect()
+# Insert a document into the MongoDB collection
+mongodb_db_without_ssh.execute_query({'insert': {'name': 'John Doe', 'age': 32}})
+# Find all documents in the MongoDB collection
+mongodb_result_without_ssh = mongodb_db_without_ssh.execute_query({'find': {'age': 32}})
+print("MongoDB result without SSH:", mongodb_result_without_ssh)
+mongodb_db_without_ssh.disconnect()
+
+# MongoDB example with SSH tunnel
+mongodb_config_with_ssh = {
+    'host': 'localhost',
+    'port': 27017,
+    'database': 'mobiledata_db',
+    'collection': 'test_db',
+    'ssh': {
+        'ssh_host': 'ssh.example.com',
+        'ssh_user': 'ssh_user',
+        'ssh_pass': 'ssh_pass',
+        'ssh_port': 22
+    }
+}
+mongodb_db_with_ssh = DatabaseFactory.get_database('mongodb', mongodb_config_with_ssh)
+mongodb_db_with_ssh.connect()
+# Insert a document into the MongoDB collection
+mongodb_db_with_ssh.execute_query({'insert': {'name': 'Jane Doe', 'age': 31}})
+# Find all documents in the MongoDB collection
+mongodb_result_with_ssh = mongodb_db_with_ssh.execute_query({'find': {'age': 31}})
+print("MongoDB result with SSH:", mongodb_result_with_ssh)
+mongodb_db_with_ssh.disconnect()
+

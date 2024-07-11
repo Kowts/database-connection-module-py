@@ -1,0 +1,5 @@
+cx_Oracle==8.3.0
+mysql-connector-python
+psycopg2==2.9.9
+pymongo==4.7.3
+pyodbc==5.1.0
