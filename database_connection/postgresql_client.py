@@ -1,7 +1,6 @@
-# database_connection/postgresql_database.py
-
 import psycopg2
 from psycopg2 import pool, OperationalError, DatabaseError
+from psycopg2.extras import DictCursor, execute_batch
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
 from contextlib import contextmanager
@@ -51,13 +50,14 @@ class PostgreSQLClient(BaseDatabase):
         finally:
             self.connection_pool.putconn(connection)
 
-    def execute_query(self, query, params=None):
+    def execute_query(self, query, params=None, fetch_as_dict=False):
         """
         Execute a PostgreSQL database query.
 
         Args:
             query (str or psycopg2.sql.SQL): The query to be executed.
             params (tuple or dict, optional): Parameters for the query.
+            fetch_as_dict (bool, optional): Whether to fetch results as dictionaries.
 
         Returns:
             list: Result of the query execution if it is a SELECT query.
@@ -68,7 +68,7 @@ class PostgreSQLClient(BaseDatabase):
         """
         with self.get_connection() as connection:
             try:
-                with connection.cursor() as cursor:
+                with connection.cursor(cursor_factory=DictCursor if fetch_as_dict else None) as cursor:
                     cursor.execute(query, params)
                     if query.strip().lower().startswith("select"):
                         result = cursor.fetchall()
@@ -79,6 +79,28 @@ class PostgreSQLClient(BaseDatabase):
             except (OperationalError, DatabaseError) as err:
                 connection.rollback()
                 logger.error(f"Error executing query: {err}")
+                raise DatabaseConnectionError(err)
+
+    def execute_batch_query(self, query, values):
+        """
+        Execute a batch of PostgreSQL database queries.
+
+        Args:
+            query (str or psycopg2.sql.SQL): The query to be executed.
+            values (list of tuple): List of tuples with parameters for each query execution.
+
+        Raises:
+            DatabaseConnectionError: If there is an error executing the queries.
+        """
+        with self.get_connection() as connection:
+            try:
+                with connection.cursor() as cursor:
+                    execute_batch(cursor, query, values)
+                    connection.commit()
+                    logger.info("Batch query executed successfully.")
+            except (OperationalError, DatabaseError) as err:
+                connection.rollback()
+                logger.error(f"Error executing batch query: {err}")
                 raise DatabaseConnectionError(err)
 
     def execute_transaction(self, queries):
