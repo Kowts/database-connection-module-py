@@ -5,12 +5,12 @@ from datetime import date, datetime
 logger = logging.getLogger(__name__)
 
 
-class GenericCRUD:
+class PostgresqlGenericCRUD:
     """Generic CRUD operations for any table."""
 
     def __init__(self, db_client):
         """
-        Initialize the GenericCRUD class.
+        Initialize the PostgresqlGenericCRUD class.
 
         Args:
             db_client: An instance of a database client (e.g., PostgreSQLClient).
@@ -82,8 +82,7 @@ class GenericCRUD:
 
         for value_tuple in values:
             if len(value_tuple) != len(columns):
-                raise ValueError(
-                    f"Number of values {len(value_tuple)} does not match number of columns {len(columns)}")
+                raise ValueError(f"Number of values {len(value_tuple)} does not match number of columns {len(columns)}")
 
         columns_str = ", ".join(columns)
         placeholders = ", ".join(["%s"] * len(columns))
