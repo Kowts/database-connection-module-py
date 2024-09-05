@@ -30,8 +30,7 @@ if __name__ == "__main__":
     try:
         # PostgreSQL example using environment variables
         postgresql_config = get_postgresql_config()
-        postgresql_db = DatabaseFactory.get_database(
-            'postgresql', postgresql_config)
+        postgresql_db = DatabaseFactory.get_database('postgresql', postgresql_config)
         postgresql_db.connect()
 
         # Initialize PostgresqlGenericCRUD
