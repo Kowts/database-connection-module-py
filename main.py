@@ -1,7 +1,7 @@
 import logging
 from decouple import config
 from database_connection import DatabaseFactory, DatabaseConnectionError
-from database_connection.generic_crud import GenericCRUD
+from database_connection.postgresql_generic_crud import PostgresqlGenericCRUD
 from typing import Any, Dict
 
 # Configure logging
@@ -34,8 +34,8 @@ if __name__ == "__main__":
             'postgresql', postgresql_config)
         postgresql_db.connect()
 
-        # Initialize GenericCRUD
-        crud = GenericCRUD(postgresql_db)
+        # Initialize PostgresqlGenericCRUD
+        crud = PostgresqlGenericCRUD(postgresql_db)
 
         # Insert a record into the employee_details_ext table
         columns = [
