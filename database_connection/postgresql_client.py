@@ -7,7 +7,6 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-
 class PostgreSQLClient(BaseDatabase):
     """PostgreSQL database connection and operations."""
 
@@ -23,6 +22,9 @@ class PostgreSQLClient(BaseDatabase):
 
     def connect(self):
         """Establish the PostgreSQL database connection pool."""
+        if self.connection_pool:
+            logger.warning("Connection pool is already initialized.")
+            return
         try:
             self.connection_pool = psycopg2.pool.SimpleConnectionPool(
                 minconn=1,
@@ -40,13 +42,20 @@ class PostgreSQLClient(BaseDatabase):
         if self.connection_pool:
             self.connection_pool.closeall()
             logger.info("PostgreSQL connection pool closed successfully.")
+        else:
+            logger.warning("No connection pool found to close.")
 
     @contextmanager
     def get_connection(self):
         """Context manager for getting a connection from the pool."""
+        if not self.connection_pool:
+            raise DatabaseConnectionError("Connection pool is not initialized.")
         connection = self.connection_pool.getconn()
         try:
             yield connection
+        except Exception as err:
+            logger.error(f"Error during connection handling: {err}")
+            raise
         finally:
             self.connection_pool.putconn(connection)
 
@@ -69,8 +78,9 @@ class PostgreSQLClient(BaseDatabase):
         with self.get_connection() as connection:
             try:
                 with connection.cursor(cursor_factory=DictCursor if fetch_as_dict else None) as cursor:
+                    logger.debug(f"Executing query: {query}, Params: {params}")
                     cursor.execute(query, params)
-                    if query.strip().lower().startswith("select"):
+                    if cursor.description:  # cursor.description is None for non-SELECT queries
                         result = cursor.fetchall()
                     else:
                         result = cursor.rowcount
@@ -78,7 +88,7 @@ class PostgreSQLClient(BaseDatabase):
                     return result
             except (OperationalError, DatabaseError) as err:
                 connection.rollback()
-                logger.error(f"Error executing query: {err}")
+                logger.error(f"Error executing query: {query}, Params: {params}, Error: {err}")
                 raise DatabaseConnectionError(err)
 
     def execute_batch_query(self, query, values):
@@ -95,12 +105,13 @@ class PostgreSQLClient(BaseDatabase):
         with self.get_connection() as connection:
             try:
                 with connection.cursor() as cursor:
+                    logger.debug(f"Executing batch query: {query}, Values: {values[:10]}...")  # Log only a sample of values
                     execute_batch(cursor, query, values)
                     connection.commit()
                     logger.info("Batch query executed successfully.")
             except (OperationalError, DatabaseError) as err:
                 connection.rollback()
-                logger.error(f"Error executing batch query: {err}")
+                logger.error(f"Error executing batch query: {query}, Error: {err}")
                 raise DatabaseConnectionError(err)
 
     def execute_transaction(self, queries):
@@ -117,6 +128,7 @@ class PostgreSQLClient(BaseDatabase):
             try:
                 with connection.cursor() as cursor:
                     for query, params in queries:
+                        logger.debug(f"Executing transactional query: {query}, Params: {params}")
                         cursor.execute(query, params)
                     connection.commit()
                     logger.info("Transaction committed successfully.")

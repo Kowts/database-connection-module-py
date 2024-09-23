@@ -4,7 +4,6 @@ from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
 
-
 class PostgresqlGenericCRUD:
     """Generic CRUD operations for any table."""
 
@@ -28,7 +27,7 @@ class PostgresqlGenericCRUD:
         Returns:
             list: List of column names.
         """
-        query = f"""
+        query = """
         SELECT COLUMN_NAME
         FROM information_schema.COLUMNS
         WHERE TABLE_NAME = %s
@@ -43,8 +42,68 @@ class PostgresqlGenericCRUD:
             columns = [row['column_name'] for row in result]
             return columns
         except Exception as e:
-            logger.error(f"Failed to get table columns. Error: {e}")
+            logger.error(f"Failed to get table columns for table '{table}'. Error: {e}")
             raise
+
+    def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> bool:
+        """
+        Create a table with the specified columns if it does not already exist.
+
+        Args:
+            table (str): The name of the table to create.
+            columns (list): List of column names.
+            values (list of tuples): List of tuples representing the values to insert.
+
+        Returns:
+            bool: True if the table was created, False if it already existed.
+        """
+        existing_columns = self._get_table_columns(table)
+        if existing_columns:
+            logger.info(f"Table '{table}' already exists.")
+            return False
+
+        column_types = self._infer_column_types(values, columns)
+        columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
+        create_query = f"CREATE TABLE {table} ({columns_def})"
+
+        try:
+            self.db_client.execute_query(create_query)
+            logger.info(f"Table '{table}' created successfully.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create table '{table}'. Error: {e}")
+            raise
+
+    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
+        """
+        Infer column data types based on the values provided.
+
+        Args:
+            values (list of tuples): List of tuples representing the values to insert.
+            columns (list): List of column names.
+
+        Returns:
+            dict: Dictionary of column names and their inferred data types.
+        """
+        types = {}
+        if values:
+            sample = values[0]
+            for column, value in zip(columns, sample):
+                if isinstance(value, int):
+                    types[column] = 'INT'
+                elif isinstance(value, float):
+                    types[column] = 'FLOAT'
+                elif isinstance(value, str):
+                    types[column] = 'TEXT'
+                elif isinstance(value, dict):
+                    types[column] = 'JSONB'
+                elif isinstance(value, date):
+                    types[column] = 'DATE'
+                elif isinstance(value, datetime):
+                    types[column] = 'TIMESTAMP'
+                else:
+                    types[column] = 'TEXT'  # Default to TEXT for any other types
+        return types
 
     def _format_dates(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -58,8 +117,7 @@ class PostgresqlGenericCRUD:
         """
         for key, value in record.items():
             if isinstance(value, (date, datetime)):
-                record[key] = value.strftime(
-                    '%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
+                record[key] = value.strftime('%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
         return record
 
     def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None) -> None:
@@ -80,6 +138,8 @@ class PostgresqlGenericCRUD:
         elif not all(isinstance(v, tuple) for v in values):
             raise ValueError("Values must be a tuple or a list of tuples.")
 
+        self.create_table_if_not_exists(table, columns, values)
+
         for value_tuple in values:
             if len(value_tuple) != len(columns):
                 raise ValueError(f"Number of values {len(value_tuple)} does not match number of columns {len(columns)}")
@@ -90,10 +150,10 @@ class PostgresqlGenericCRUD:
 
         try:
             self.db_client.execute_batch_query(query, values)
-            logger.info("Records inserted.")
+            logger.info(f"Records inserted into table '{table}'.")
             return True
         except Exception as e:
-            logger.error(f"Failed to insert records. Error: {e}")
+            logger.error(f"Failed to insert records into table '{table}'. Error: {e}")
             raise
 
     def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False) -> List[Dict[str, Any]]:
@@ -118,14 +178,12 @@ class PostgresqlGenericCRUD:
         if where:
             query += f" WHERE {where}"
         try:
-            result = self.db_client.execute_query(
-                query, params, fetch_as_dict=False)
-            records = [self._format_dates(
-                dict(zip(columns, row))) for row in result]
-            logger.info("Records found.")
+            result = self.db_client.execute_query(query, params, fetch_as_dict=True)
+            records = [self._format_dates(row) for row in result]
+            logger.info(f"Records retrieved from table '{table}'.")
             return records
         except Exception as e:
-            logger.error(f"Failed to read records. Error: {e}")
+            logger.error(f"Failed to read records from table '{table}'. Error: {e}")
             raise
 
     def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> None:
@@ -143,10 +201,10 @@ class PostgresqlGenericCRUD:
         values = tuple(updates.values()) + params
         try:
             self.db_client.execute_query(query, values)
-            logger.info("Records updated.")
+            logger.info(f"Records updated in table '{table}'.")
             return True
         except Exception as e:
-            logger.error(f"Failed to update records. Error: {e}")
+            logger.error(f"Failed to update records in table '{table}'. Error: {e}")
             raise
 
     def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> None:
@@ -163,8 +221,8 @@ class PostgresqlGenericCRUD:
             query += f" WHERE {where}"
         try:
             self.db_client.execute_query(query, params)
-            logger.info("Records deleted")
+            logger.info(f"Records deleted from table '{table}'.")
             return True
         except Exception as e:
-            logger.error(f"Failed to delete records. Error: {e}")
+            logger.error(f"Failed to delete records from table '{table}'. Error: {e}")
             raise

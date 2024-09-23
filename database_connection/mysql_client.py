@@ -19,16 +19,16 @@ class MySQLClient(BaseDatabase):
         super().__init__(config)
         self.connection_pool = None
 
-    def connect(self):
+    def connect(self, pool_size=10):
         """Establish the MySQL database connection pool."""
         try:
             self.connection_pool = mysql.connector.pooling.MySQLConnectionPool(
                 pool_name="mypool",
-                pool_size=10,  # Adjust the pool size as needed
+                pool_size=pool_size,  # Pool size is now configurable
                 **self.config
             )
             if self.connection_pool:
-                logger.info("MySQL connection pool created successfully.")
+                logger.info(f"MySQL connection pool created successfully with pool size {pool_size}.")
         except MySQLError as err:
             logger.error(f"Error creating MySQL connection pool: {err}")
             raise DatabaseConnectionError(err)
@@ -36,18 +36,27 @@ class MySQLClient(BaseDatabase):
     def disconnect(self):
         """Close the MySQL database connection pool."""
         if self.connection_pool:
-            self.connection_pool = None  # No direct method to close the pool
+            self.connection_pool = None  # Effectively reset the pool since no direct close method exists
             logger.info("MySQL connection pool closed successfully.")
+        else:
+            logger.warning("No active connection pool to close.")
 
     @contextmanager
     def get_connection(self):
         """Context manager for getting a connection from the pool."""
+        if not self.connection_pool:
+            raise DatabaseConnectionError("Connection pool is not initialized.")
+
         connection = self.connection_pool.get_connection()
         try:
             yield connection
+        except MySQLError as err:
+            logger.error(f"Error with MySQL connection: {err}")
+            raise
         finally:
-            if connection.is_connected():
+            if connection and connection.is_connected():
                 connection.close()
+                logger.debug("MySQL connection returned to the pool.")
 
     def execute_query(self, query, params=None):
         """
@@ -67,16 +76,24 @@ class MySQLClient(BaseDatabase):
         with self.get_connection() as connection:
             try:
                 with connection.cursor() as cursor:
+                    logger.debug(f"Executing query: {query}, Params: {params}")
                     cursor.execute(query, params)
+
                     if query.strip().lower().startswith("select"):
                         result = cursor.fetchall()
                     else:
                         result = cursor.rowcount
                         connection.commit()
+
                     logger.info(f"Query executed successfully: {query}")
                     return result
+
             except MySQLError as err:
-                logger.error(f"Error executing query: {err}")
+                if not query.strip().lower().startswith("select"):
+                    connection.rollback()
+                    logger.warning(f"Transaction rollback due to query error: {err}")
+
+                logger.error(f"Error executing query: {query}, Params: {params}, Error: {err}")
                 raise DatabaseConnectionError(err)
 
     def execute_batch_query(self, query, values):
@@ -93,12 +110,13 @@ class MySQLClient(BaseDatabase):
         with self.get_connection() as connection:
             try:
                 with connection.cursor() as cursor:
+                    logger.debug(f"Executing batch query: {query}, First 5 values: {values[:5]}")  # Log a sample of values
                     cursor.executemany(query, values)
                     connection.commit()
                     logger.info("Batch query executed successfully.")
             except MySQLError as err:
                 connection.rollback()
-                logger.error(f"Error executing batch query: {err}")
+                logger.error(f"Error executing batch query: {query}, Error: {err}")
                 raise DatabaseConnectionError(err)
 
     def execute_transaction(self, queries):
@@ -115,10 +133,11 @@ class MySQLClient(BaseDatabase):
             try:
                 with connection.cursor() as cursor:
                     for query, params in queries:
+                        logger.debug(f"Executing transactional query: {query}, Params: {params}")
                         cursor.execute(query, params)
                     connection.commit()
                     logger.info("Transaction committed successfully.")
             except MySQLError as err:
                 connection.rollback()
-                logger.error(f"Error executing transaction: {err}")
+                logger.error(f"Error executing transaction, performing rollback. Error: {err}")
                 raise DatabaseConnectionError(err)

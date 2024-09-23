@@ -6,7 +6,7 @@ from contextlib import contextmanager
 logger = logging.getLogger(__name__)
 
 class OracleClient(BaseDatabase):
-    """Oracle database connection and operations."""
+    """Oracle database connection and operations with connection pooling."""
 
     def __init__(self, config):
         """
@@ -16,46 +16,63 @@ class OracleClient(BaseDatabase):
             config (dict): Configuration parameters for the Oracle connection.
         """
         super().__init__(config)
-        self.connection = None
+        self.pool = None
 
     def connect(self):
-        """Establish the Oracle database connection."""
+        """Establish a connection pool to the Oracle database."""
         try:
             # Initialize Oracle client if necessary
             cx_Oracle.init_oracle_client(lib_dir=r"C:\Program Files\PremiumSoft\Navicat Premium 16\instantclient_11_2")
 
             # Use service_name or sid based on configuration
             if 'service_name' in self.config:
-                dsn = cx_Oracle.makedsn(
-                    self.config['host'], self.config['port'], service_name=self.config['service_name'])
+                dsn = cx_Oracle.makedsn(self.config['host'], self.config['port'], service_name=self.config['service_name'])
             elif 'sid' in self.config:
-                dsn = cx_Oracle.makedsn(
-                    self.config['host'], self.config['port'], sid=self.config['sid'])
+                dsn = cx_Oracle.makedsn(self.config['host'], self.config['port'], sid=self.config['sid'])
             else:
-                raise ValueError(
-                    "Either 'service_name' or 'sid' must be provided in the configuration.")
+                raise ValueError("Either 'service_name' or 'sid' must be provided in the configuration.")
 
-            self.connection = cx_Oracle.connect(
-                self.config['user'], self.config['password'], dsn)
-            logger.info("Oracle Database connected successfully.")
+            # Create a connection pool for efficient connection management
+            self.pool = cx_Oracle.SessionPool(
+                user=self.config['user'],
+                password=self.config['password'],
+                dsn=dsn,
+                min=2,  # Minimum number of connections in the pool
+                max=10,  # Maximum number of connections in the pool
+                increment=1,  # Increment by 1 connection when more are needed
+                threaded=True,  # Allow multithreading
+                encoding="UTF-8"
+            )
+
+            logger.info("Oracle connection pool created successfully.")
         except cx_Oracle.Error as err:
             error, = err.args
-            logger.error(f"Error connecting to Oracle Database: {error.message}")
+            logger.error(f"Error creating Oracle connection pool: {error.message}")
             raise DatabaseConnectionError(error.message)
 
     def disconnect(self):
-        """Close the Oracle database connection."""
-        if self.connection:
-            self.connection.close()
-            logger.info("Oracle Database disconnected successfully.")
+        """Close the Oracle connection pool."""
+        if self.pool:
+            self.pool.close()
+            logger.info("Oracle connection pool closed successfully.")
 
     @contextmanager
     def get_connection(self):
-        """Context manager for getting a connection."""
+        """
+        Context manager for getting a connection from the pool.
+
+        Yields:
+            cx_Oracle.Connection: A connection object from the pool.
+        """
+        connection = None
         try:
-            yield self.connection
+            # Get a connection from the pool
+            connection = self.pool.acquire()
+            yield connection
         finally:
-            pass  # In case we need to manage the connection lifecycle differently
+            if connection:
+                # Return the connection to the pool
+                self.pool.release(connection)
 
     def execute_query(self, query, params=None, fetch_as_dict=False):
         """
@@ -88,8 +105,8 @@ class OracleClient(BaseDatabase):
                     connection.commit()
                 return result
             except cx_Oracle.Error as err:
-                connection.rollback()
                 logger.error(f"Error executing query: {err}")
+                connection.rollback()
                 raise DatabaseConnectionError(err)
 
     def execute_batch_query(self, query, values):

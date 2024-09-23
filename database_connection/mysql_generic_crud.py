@@ -30,10 +30,10 @@ class MySQLGenericCRUD:
         Raises:
             Exception: If the query fails or an error occurs during execution.
         """
-        query = f"""
+        query = """
         SELECT COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = %s
+        WHERE LOWER(TABLE_NAME) = LOWER(%s)
         AND TABLE_SCHEMA = DATABASE()
         """
         if not show_id:
@@ -46,7 +46,7 @@ class MySQLGenericCRUD:
             columns = [row['COLUMN_NAME'] for row in result]
             return columns
         except Exception as e:
-            logger.error(f"Failed to get table columns for '{table}'. Error: {e}")
+            logger.error(f"Failed to get columns for table '{table}'. Error: {e}")
             raise
 
     def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
@@ -72,13 +72,7 @@ class MySQLGenericCRUD:
         for idx, column in enumerate(columns):
             # Find the first non-None value in the current column to infer the type
             sample_value = next((row[idx] for row in values if row[idx] is not None), None)
-            if sample_value is None:
-                # Default to VARCHAR(255) if all values are None
-                inferred_types[column] = "VARCHAR(255)"
-            else:
-                # Map Python type to MySQL type
-                inferred_types[column] = type_mapping.get(type(sample_value), "VARCHAR(255)")
-
+            inferred_types[column] = type_mapping.get(type(sample_value), "VARCHAR(255)") if sample_value else "VARCHAR(255)"
         return inferred_types
 
     def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> None:
@@ -138,11 +132,9 @@ class MySQLGenericCRUD:
             values (list of tuples): List of tuples of values to insert.
             columns (list, optional): List of column names. If None, columns will be inferred from the table schema.
         """
-        # Check if the table already exists by retrieving its columns
         existing_columns = self._get_table_columns(table)
         if not existing_columns:
             logger.info(f"Table '{table}' does not exist. Creating the table...")
-            # If no columns found, create the table
             if columns is None:
                 raise ValueError("Columns must be provided when creating a new table.")
             self.create_table_if_not_exists(table, columns, values)
@@ -167,10 +159,9 @@ class MySQLGenericCRUD:
 
         try:
             self.db_client.execute_batch_query(query, values)
-            logger.info("Records inserted.")
-            return True
+            logger.info(f"Records inserted into table '{table}'.")
         except Exception as e:
-            logger.error(f"Failed to insert records. Error: {e}")
+            logger.error(f"Failed to insert records into '{table}'. Error: {e}")
             raise
 
     def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False) -> List[Dict[str, Any]]:
@@ -198,10 +189,10 @@ class MySQLGenericCRUD:
         try:
             result = self.db_client.execute_query(query, params, fetch_as_dict=True)
             records = [self._format_dates(record) for record in result]
-            logger.info("Records found.")
+            logger.info(f"Records retrieved from table '{table}'.")
             return records
         except Exception as e:
-            logger.error(f"Failed to read records. Error: {e}")
+            logger.error(f"Failed to read records from '{table}'. Error: {e}")
             raise
 
     def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> None:
@@ -219,10 +210,9 @@ class MySQLGenericCRUD:
         values = tuple(updates.values()) + params
         try:
             self.db_client.execute_query(query, values)
-            logger.info("Records updated.")
-            return True
+            logger.info(f"Records updated in table '{table}'.")
         except Exception as e:
-            logger.error(f"Failed to update records. Error: {e}")
+            logger.error(f"Failed to update records in '{table}'. Error: {e}")
             raise
 
     def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> None:
@@ -237,12 +227,12 @@ class MySQLGenericCRUD:
         query = f"DELETE FROM {table}"
         if where:
             query += f" WHERE {where}"
+
         try:
             self.db_client.execute_query(query, params)
-            logger.info("Records deleted")
-            return True
+            logger.info(f"Records deleted from table '{table}'.")
         except Exception as e:
-            logger.error(f"Failed to delete records. Error: {e}")
+            logger.error(f"Failed to delete records from '{table}'. Error: {e}")
             raise
 
     def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
@@ -259,17 +249,13 @@ class MySQLGenericCRUD:
         try:
             is_select_query = query.strip().lower().startswith('select')
             if is_select_query:
-                # Execute the SELECT query and get results as a list of dictionaries
                 result = self.db_client.execute_query(query, params, fetch_as_dict=True)
-                # Format dates in each record
                 formatted_result = [self._format_dates(record) for record in result]
                 return formatted_result
             else:
-                # Execute the non-SELECT query
                 self.db_client.execute_query(query, params)
-                logger.info("Query executed successfully.")
+                logger.info("Raw query executed successfully.")
                 return None
         except Exception as e:
             logger.error(f"Failed to execute raw query. Error: {e}")
             raise
-

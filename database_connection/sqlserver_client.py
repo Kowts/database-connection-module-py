@@ -2,6 +2,7 @@ import pyodbc
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
 from typing import Any, Dict, List, Optional
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,9 @@ class SQLServerClient(BaseDatabase):
                 f"UID={self.config['login']};"
                 f"PWD={self.config['password']};"
                 f"Encrypt=no;TrustServerCertificate=yes;"
+                f"MultipleActiveResultSets=true;"
+                f"Connection Pooling=true;"
+                f"Max Pool Size={self.config.get('max_pool_size', 100)};"
                 f"{self.config.get('additional_params', '')}"
             )
             self.connection = pyodbc.connect(connection_string)
@@ -44,13 +48,11 @@ class SQLServerClient(BaseDatabase):
         Returns:
             Optional[list]: If the query is a SELECT query and fetch_as_dict is True, returns a list of dictionaries representing rows. Otherwise, returns the result.
         """
+        start_time = time.time()
+        cursor = None
         try:
             cursor = self.connection.cursor()
-
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
+            cursor.execute(query, params or ())
 
             if query.strip().lower().startswith("select"):
                 if fetch_as_dict:
@@ -66,7 +68,15 @@ class SQLServerClient(BaseDatabase):
 
         except pyodbc.Error as err:
             logger.error(f"Failed to execute query. Error: {err}")
+            self.connection.rollback()  # Ensure rollback on failure
             raise
+
+        finally:
+            if cursor:
+                cursor.close()  # Ensure cursor is closed
+            elapsed_time = time.time() - start_time
+            if elapsed_time > self.config.get('long_query_threshold', 60):
+                logger.warning(f"Query took too long ({elapsed_time} seconds): {query}")
 
     def execute_batch_query(self, query: str, params_list: List[Dict[str, Any]]) -> None:
         """
@@ -79,6 +89,8 @@ class SQLServerClient(BaseDatabase):
         Returns:
             None
         """
+        start_time = time.time()
+        cursor = None
         try:
             cursor = self.connection.cursor()
             cursor.fast_executemany = True
@@ -87,7 +99,15 @@ class SQLServerClient(BaseDatabase):
             logger.info("Batch query executed successfully.")
         except pyodbc.Error as err:
             logger.error(f"Failed to execute batch query. Error: {err}")
+            self.connection.rollback()  # Ensure rollback on failure
             raise
+
+        finally:
+            if cursor:
+                cursor.close()  # Ensure cursor is closed
+            elapsed_time = time.time() - start_time
+            if elapsed_time > self.config.get('long_query_threshold', 60):
+                logger.warning(f"Batch query took too long ({elapsed_time} seconds): {query}")
 
     def begin_transaction(self):
         """Begin a database transaction."""
@@ -117,3 +137,25 @@ class SQLServerClient(BaseDatabase):
         except pyodbc.Error as err:
             logger.error(f"Failed to rollback transaction. Error: {err}")
             raise
+
+    def get_new_connection(self) -> pyodbc.Connection:
+        """Get a new connection for parallel tasks."""
+        try:
+            connection_string = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={self.config['server']},{self.config['port']};"
+                f"DATABASE={self.config['database']};"
+                f"UID={self.config['login']};"
+                f"PWD={self.config['password']};"
+                f"Encrypt=no;TrustServerCertificate=yes;"
+                f"MultipleActiveResultSets=true;"
+                f"Connection Pooling=true;"
+                f"Max Pool Size={self.config.get('max_pool_size', 100)};"
+                f"{self.config.get('additional_params', '')}"
+            )
+            connection = pyodbc.connect(connection_string)
+            logger.info("New SQL Server Database connection created for parallel task.")
+            return connection
+        except pyodbc.Error as err:
+            logger.error(f"Error creating new SQL Server Database connection: {err}")
+            raise DatabaseConnectionError(err)
