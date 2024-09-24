@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, List, Tuple
 import logging
 from datetime import date, datetime
@@ -47,7 +48,7 @@ class PostgresqlGenericCRUD:
 
     def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> bool:
         """
-        Create a table with the specified columns if it does not already exist.
+        Create a table with the specified columns if it does not already exist. Adds an 'id' column as the primary key by default.
 
         Args:
             table (str): The name of the table to create.
@@ -57,22 +58,37 @@ class PostgresqlGenericCRUD:
         Returns:
             bool: True if the table was created, False if it already existed.
         """
-        existing_columns = self._get_table_columns(table)
+        existing_columns = self._get_table_columns(table, show_id=True)
         if existing_columns:
             logger.info(f"Table '{table}' already exists.")
             return False
 
+        # Infer column types from the provided values
         column_types = self._infer_column_types(values, columns)
+
+        # Add the 'id' column as an auto-incrementing primary key
+        column_types['id'] = 'SERIAL PRIMARY KEY'
+
+        # Construct the column definitions for the CREATE TABLE query
         columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
         create_query = f"CREATE TABLE {table} ({columns_def})"
 
         try:
             self.db_client.execute_query(create_query)
-            logger.info(f"Table '{table}' created successfully.")
+            logger.info(f"Table '{table}' created successfully with an 'id' column.")
             return True
         except Exception as e:
             logger.error(f"Failed to create table '{table}'. Error: {e}")
             raise
+
+    def escape_column_name(self, column_name: str) -> str:
+        """
+        Escape reserved SQL keywords used as column names by enclosing them in double quotes.
+        """
+        reserved_keywords = {'from', 'select', 'table', 'order', 'group'}  # Add more keywords if necessary
+        if column_name.lower() in reserved_keywords:
+            return f'"{column_name}"'
+        return column_name
 
     def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
         """
@@ -87,7 +103,7 @@ class PostgresqlGenericCRUD:
         """
         types = {}
         if values:
-            sample = values[0]
+            sample = values[0]  # Use the first row of values for type inference
             for column, value in zip(columns, sample):
                 if isinstance(value, int):
                     types[column] = 'INT'
@@ -96,7 +112,17 @@ class PostgresqlGenericCRUD:
                 elif isinstance(value, str):
                     types[column] = 'TEXT'
                 elif isinstance(value, dict):
+                    # Use JSONB type for dictionaries
                     types[column] = 'JSONB'
+                elif isinstance(value, list):
+                    # Check if the list contains dictionaries or mixed types
+                    if all(isinstance(i, dict) for i in value):
+                        types[column] = 'JSONB'  # Store lists of dictionaries as JSONB
+                    elif all(isinstance(i, (int, str)) for i in value):
+                        types[column] = 'TEXT[]' if isinstance(value[0], str) else 'INT[]'  # Handle lists of strings or integers
+                    else:
+                        # For mixed or unknown types in the list, store as JSONB
+                        types[column] = 'JSONB'
                 elif isinstance(value, date):
                     types[column] = 'DATE'
                 elif isinstance(value, datetime):
@@ -138,6 +164,19 @@ class PostgresqlGenericCRUD:
         elif not all(isinstance(v, tuple) for v in values):
             raise ValueError("Values must be a tuple or a list of tuples.")
 
+        # Convert dicts and lists of dicts to JSON
+        def convert_value(value):
+            if isinstance(value, dict) or isinstance(value, list):
+                # Convert dicts or lists (such as lists of dictionaries) to JSON
+                return json.dumps(value)
+            return value  # Return the original value if no conversion is needed
+
+        # Apply conversion to each value in the tuples
+        values = [
+            tuple(convert_value(v) for v in value_tuple)
+            for value_tuple in values
+        ]
+
         self.create_table_if_not_exists(table, columns, values)
 
         for value_tuple in values:
@@ -173,10 +212,13 @@ class PostgresqlGenericCRUD:
         if columns is None:
             columns = self._get_table_columns(table, show_id=show_id)
 
-        columns_str = ", ".join(columns) if columns else "*"
+        # Escape column names if necessary
+        columns_str = ", ".join([self.escape_column_name(col) for col in columns])
+
         query = f"SELECT {columns_str} FROM {table}"
         if where:
             query += f" WHERE {where}"
+
         try:
             result = self.db_client.execute_query(query, params, fetch_as_dict=True)
             records = [self._format_dates(row) for row in result]
