@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import json
 from typing import Any, Dict, List, Tuple
 import logging
@@ -48,7 +49,7 @@ class PostgresqlGenericCRUD:
 
     def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> bool:
         """
-        Create a table with the specified columns if it does not already exist. Adds an 'id' column as the primary key by default.
+        Create a table with the specified columns if it does not already exist.
 
         Args:
             table (str): The name of the table to create.
@@ -58,24 +59,30 @@ class PostgresqlGenericCRUD:
         Returns:
             bool: True if the table was created, False if it already existed.
         """
-        existing_columns = self._get_table_columns(table, show_id=True)
+        existing_columns = self._get_table_columns(table)
         if existing_columns:
             logger.info(f"Table '{table}' already exists.")
             return False
 
-        # Infer column types from the provided values
-        column_types = self._infer_column_types(values, columns)
+        # Create an ordered dictionary for column types
+        column_types = OrderedDict()
 
-        # Add the 'id' column as an auto-incrementing primary key
-        column_types['id'] = 'SERIAL PRIMARY KEY'
+        # Add 'id' column as the first entry
+        column_types['id'] = 'SERIAL PRIMARY KEY'  # Define 'id' as an auto-incrementing primary key
 
-        # Construct the column definitions for the CREATE TABLE query
+        # Infer types for the remaining columns
+        inferred_types = self._infer_column_types(values, columns)
+
+        # Update the ordered dictionary with the inferred types
+        column_types.update(inferred_types)
+
+        # Construct the column definitions
         columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
         create_query = f"CREATE TABLE {table} ({columns_def})"
 
         try:
             self.db_client.execute_query(create_query)
-            logger.info(f"Table '{table}' created successfully with an 'id' column.")
+            logger.info(f"Table '{table}' created successfully with 'id' column.")
             return True
         except Exception as e:
             logger.error(f"Failed to create table '{table}'. Error: {e}")
