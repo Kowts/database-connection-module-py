@@ -120,7 +120,7 @@ class SQLServerGenericCRUD:
                     types[column] = 'VARCHAR(MAX)'
         return types
 
-    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None) -> int:
+    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None) -> bool:
         """
         Create new records in the specified table.
 
@@ -130,8 +130,9 @@ class SQLServerGenericCRUD:
             columns (list, optional): List of column names. If None, columns will be inferred from the table schema.
 
         Returns:
-            int: Number of records inserted.
+            bool: True if records were inserted successfully, False otherwise.
         """
+
         if columns is None:
             columns = self._get_table_columns(table)
 
@@ -182,7 +183,6 @@ class SQLServerGenericCRUD:
         if where:
             query += f" WHERE {where}"
         try:
-
             result = self.db_client.execute_query(query, params, fetch_as_dict=True)
             records = [self._format_dates(row) for row in result]
 
@@ -196,7 +196,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to read records. Error: {e}")
             raise
 
-    def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> int:
+    def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> bool:
         """
         Update records in the specified table.
 
@@ -207,20 +207,20 @@ class SQLServerGenericCRUD:
             params (tuple): Tuple of parameters for the WHERE clause.
 
         Returns:
-            int: Number of records updated.
+            bool: True if records were updated successfully, False otherwise.
         """
         set_clause = ", ".join([f"{col} = ?" for col in updates.keys()])
         query = f"UPDATE {table} SET {set_clause} WHERE {where}"
         values = tuple(updates.values()) + params
         try:
             self.db_client.execute_query(query, values)
-            logger.info("Records updated")
+            logger.info("Records updated successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to update records. Error: {e}")
             return False
 
-    def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> int:
+    def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> bool:
         """
         Delete records from the specified table.
 
@@ -230,40 +230,70 @@ class SQLServerGenericCRUD:
             params (tuple, optional): Tuple of parameters for the WHERE clause.
 
         Returns:
-            int: Number of records deleted.
+            bool: True if records were deleted successfully, False otherwise.
         """
         query = f"DELETE FROM {table}"
         if where:
             query += f" WHERE {where}"
         try:
             self.db_client.execute_query(query, params)
-            logger.info("Records deleted")
+            logger.info("Records deleted successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to delete records. Error: {e}")
             return False
 
-    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
+    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None, batch: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
-        Execute a raw SQL query.
+        Execute a raw SQL query (SELECT or non-SELECT).
 
         Args:
             query (str): The SQL query to execute.
-            params (dict, optional): Dictionary of parameters to bind to the query. Default is None.
+            params (dict or list of dict, optional): A dictionary of parameters for single queries or a list of dictionaries for batch queries.
+            batch (bool, optional): If True, execute the query as a batch operation. Default is False.
 
         Returns:
             Optional[list]: If the query is a SELECT query, returns a list of dictionaries representing rows. Otherwise, returns None.
         """
+        connection = self.db_client.get_new_connection()  # Ensure a new connection for this task
+        cursor = connection.cursor()
         try:
+            # Check if the query is a SELECT query
             is_select_query = query.strip().lower().startswith('select')
+
+            # Handle SELECT queries
             if is_select_query:
-                result = self.db_client.execute_query(query, params, fetch_as_dict=True)
-                logger.info("Raw SELECT query executed.")
-                return result
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+
+                # Fetch all rows and return as a list of dictionaries
+                columns = [column[0] for column in cursor.description]
+                rows = cursor.fetchall()
+                result = [dict(zip(columns, row)) for row in rows]
+                logger.info(f"Raw SELECT query executed successfully, {len(result)} rows fetched.")
+                return result if rows else []
+
+            # Handle non-SELECT queries (like INSERT, UPDATE, DELETE)
             else:
-                self.db_client.execute_query(query, params)
-                logger.info("Raw non-SELECT query executed.")
+                if batch and isinstance(params, list):
+                    # Batch execution for non-SELECT queries
+                    cursor.fast_executemany = True  # Enable fast executemany
+                    cursor.executemany(query, params)
+                else:
+                    # Single execution
+                    cursor.execute(query, params or ())
+
+                connection.commit()
+                logger.info(f"Raw non-SELECT query executed successfully, affected rows: {cursor.rowcount}.")
                 return None
+
         except Exception as e:
             logger.error(f"Failed to execute raw query. Error: {e}")
+            connection.rollback()  # Rollback in case of error
             raise
+        finally:
+            # Ensure cursor and connection are closed properly
+            cursor.close()
+            connection.close()

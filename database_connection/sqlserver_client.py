@@ -1,8 +1,8 @@
 import pyodbc
-from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
-from typing import Any, Dict, List, Optional
+from .base_database import BaseDatabase, DatabaseConnectionError
 import time
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +30,27 @@ class SQLServerClient(BaseDatabase):
             logger.error(f"Error connecting to SQL Server Database: {err}")
             raise DatabaseConnectionError(err)
 
-    def disconnect(self):
-        """Close the SQL Server database connection."""
-        if self.connection:
-            self.connection.close()
-            logger.info("SQL Server Database disconnected successfully.")
+    def get_new_connection(self) -> pyodbc.Connection:
+        """Get a new connection for parallel tasks."""
+        try:
+            connection_string = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={self.config['server']},{self.config['port']};"
+                f"DATABASE={self.config['database']};"
+                f"UID={self.config['login']};"
+                f"PWD={self.config['password']};"
+                f"Encrypt=no;TrustServerCertificate=yes;"
+                f"MultipleActiveResultSets=true;"
+                f"Connection Pooling=true;"
+                f"Max Pool Size={self.config.get('max_pool_size', 100)};"
+                f"{self.config.get('additional_params', '')}"
+            )
+            connection = pyodbc.connect(connection_string)
+            logger.info("New SQL Server Database connection created for parallel task.")
+            return connection
+        except pyodbc.Error as err:
+            logger.error(f"Error creating new SQL Server Database connection: {err}")
+            raise DatabaseConnectionError(err)
 
     def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
@@ -54,6 +70,7 @@ class SQLServerClient(BaseDatabase):
             cursor = self.connection.cursor()
             cursor.execute(query, params or ())
 
+            # Fetch the results if it's a SELECT query
             if query.strip().lower().startswith("select"):
                 if fetch_as_dict:
                     columns = [column[0] for column in cursor.description]
@@ -138,24 +155,8 @@ class SQLServerClient(BaseDatabase):
             logger.error(f"Failed to rollback transaction. Error: {err}")
             raise
 
-    def get_new_connection(self) -> pyodbc.Connection:
-        """Get a new connection for parallel tasks."""
-        try:
-            connection_string = (
-                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                f"SERVER={self.config['server']},{self.config['port']};"
-                f"DATABASE={self.config['database']};"
-                f"UID={self.config['login']};"
-                f"PWD={self.config['password']};"
-                f"Encrypt=no;TrustServerCertificate=yes;"
-                f"MultipleActiveResultSets=true;"
-                f"Connection Pooling=true;"
-                f"Max Pool Size={self.config.get('max_pool_size', 100)};"
-                f"{self.config.get('additional_params', '')}"
-            )
-            connection = pyodbc.connect(connection_string)
-            logger.info("New SQL Server Database connection created for parallel task.")
-            return connection
-        except pyodbc.Error as err:
-            logger.error(f"Error creating new SQL Server Database connection: {err}")
-            raise DatabaseConnectionError(err)
+    def disconnect(self):
+        """Close the SQL Server database connection."""
+        if self.connection:
+            self.connection.close()
+            logger.info("SQL Server Database disconnected successfully.")

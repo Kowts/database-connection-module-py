@@ -26,11 +26,14 @@ class OracleClient(BaseDatabase):
 
             # Use service_name or sid based on configuration
             if 'service_name' in self.config:
-                dsn = cx_Oracle.makedsn(self.config['host'], self.config['port'], service_name=self.config['service_name'])
+                dsn = cx_Oracle.makedsn(
+                    self.config['host'], self.config['port'], service_name=self.config['service_name'])
             elif 'sid' in self.config:
-                dsn = cx_Oracle.makedsn(self.config['host'], self.config['port'], sid=self.config['sid'])
+                dsn = cx_Oracle.makedsn(
+                    self.config['host'], self.config['port'], sid=self.config['sid'])
             else:
-                raise ValueError("Either 'service_name' or 'sid' must be provided in the configuration.")
+                raise ValueError(
+                    "Either 'service_name' or 'sid' must be provided in the configuration.")
 
             # Create a connection pool for efficient connection management
             self.pool = cx_Oracle.SessionPool(
