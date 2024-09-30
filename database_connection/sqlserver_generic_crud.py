@@ -58,6 +58,38 @@ class SQLServerGenericCRUD:
                 record[key] = value.strftime('%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
         return record
 
+    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
+        """
+        Infer column data types based on the values provided, considering multiple rows for better accuracy.
+
+        Args:
+            values (list of tuples): List of tuples representing the values to insert.
+            columns (list): List of column names.
+
+        Returns:
+            dict: Dictionary of column names and their inferred data types.
+        """
+        types = {}
+        if values:
+            for column in columns:
+                # Loop through all rows to infer the data type across multiple values
+                for row in values:
+                    value = row[columns.index(column)]
+                    if isinstance(value, int):
+                        types[column] = 'INT'
+                    elif isinstance(value, float):
+                        types[column] = 'FLOAT'
+                    elif isinstance(value, str):
+                        types[column] = 'VARCHAR(MAX)'
+                    elif isinstance(value, date):
+                        types[column] = 'DATE'
+                    elif isinstance(value, datetime):
+                        types[column] = 'DATETIME'
+                    else:
+                        types[column] = 'VARCHAR(MAX)'
+                    break  # Stop checking once we infer the type
+        return types
+
     def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> bool:
         """
         Create a table with the specified columns if it does not already exist.
@@ -70,16 +102,12 @@ class SQLServerGenericCRUD:
         Returns:
             bool: True if the table was created, False if it already existed.
         """
-        # Check if the table exists
         existing_columns = self._get_table_columns(table)
         if existing_columns:
             logger.info(f"Table '{table}' already exists.")
             return False
 
-        # Infer column data types
         column_types = self._infer_column_types(values, columns)
-
-        # Generate the CREATE TABLE query
         columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
         create_query = f"CREATE TABLE {table} ({columns_def})"
 
@@ -90,35 +118,6 @@ class SQLServerGenericCRUD:
         except Exception as e:
             logger.error(f"Failed to create table '{table}'. Error: {e}")
             raise
-
-    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
-        """
-        Infer column data types based on the values provided.
-
-        Args:
-            values (list of tuples): List of tuples representing the values to insert.
-            columns (list): List of column names.
-
-        Returns:
-            dict: Dictionary of column names and their inferred data types.
-        """
-        types = {}
-        if values:
-            sample = values[0]
-            for column, value in zip(columns, sample):
-                if isinstance(value, int):
-                    types[column] = 'INT'
-                elif isinstance(value, float):
-                    types[column] = 'FLOAT'
-                elif isinstance(value, str):
-                    types[column] = 'VARCHAR(MAX)'
-                elif isinstance(value, date):
-                    types[column] = 'DATE'
-                elif isinstance(value, datetime):
-                    types[column] = 'DATETIME'
-                else:
-                    types[column] = 'VARCHAR(MAX)'
-        return types
 
     def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None) -> bool:
         """
@@ -132,17 +131,14 @@ class SQLServerGenericCRUD:
         Returns:
             bool: True if records were inserted successfully, False otherwise.
         """
-
         if columns is None:
             columns = self._get_table_columns(table)
 
-        # Ensure values is a list of tuples
         if not isinstance(values, list):
             values = [values]
         elif not all(isinstance(v, tuple) for v in values):
             raise ValueError("Values must be a tuple or a list of tuples.")
 
-        # Create the table if it doesn't exist
         self.create_table_if_not_exists(table, columns, values)
 
         for value_tuple in values:
@@ -161,9 +157,9 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to insert records. Error: {e}")
             return False
 
-    def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False) -> List[Dict[str, Any]]:
+    def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False, batch_size: int = None) -> List[Dict[str, Any]]:
         """
-        Read records from the specified table.
+        Read records from the specified table with optional batch support.
 
         Args:
             table (str): The table name.
@@ -171,6 +167,7 @@ class SQLServerGenericCRUD:
             where (str, optional): WHERE clause for filtering records.
             params (tuple, optional): Tuple of parameters for the WHERE clause.
             show_id (bool, optional): If True, include the 'id' column. Default is False.
+            batch_size (int, optional): If provided, limits the number of records returned per batch.
 
         Returns:
             list: List of records as dictionaries.
@@ -182,15 +179,13 @@ class SQLServerGenericCRUD:
         query = f"SELECT {columns_str} FROM {table}"
         if where:
             query += f" WHERE {where}"
+        if batch_size:
+            query += f" ORDER BY {columns[0]} OFFSET 0 ROWS FETCH NEXT {batch_size} ROWS ONLY"
+
         try:
             result = self.db_client.execute_query(query, params, fetch_as_dict=True)
             records = [self._format_dates(row) for row in result]
-
-            if not records:
-                logger.info("No records found.")
-            else:
-                logger.info("Records found.")
-
+            logger.info(f"Records read successfully, {len(records)} rows found.")
             return records
         except Exception as e:
             logger.error(f"Failed to read records. Error: {e}")
@@ -220,14 +215,15 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to update records. Error: {e}")
             return False
 
-    def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> bool:
+    def delete(self, table: str, where: str = "", params: Tuple[Any] = None, batch_size: int = None) -> bool:
         """
-        Delete records from the specified table.
+        Delete records from the specified table with optional batch processing.
 
         Args:
             table (str): The table name.
             where (str, optional): WHERE clause for identifying records to delete. If empty, all records will be deleted.
             params (tuple, optional): Tuple of parameters for the WHERE clause.
+            batch_size (int, optional): If provided, deletes records in batches.
 
         Returns:
             bool: True if records were deleted successfully, False otherwise.
@@ -235,6 +231,9 @@ class SQLServerGenericCRUD:
         query = f"DELETE FROM {table}"
         if where:
             query += f" WHERE {where}"
+        if batch_size:
+            query += f" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT {batch_size} ROWS ONLY"
+
         try:
             self.db_client.execute_query(query, params)
             logger.info("Records deleted successfully")
