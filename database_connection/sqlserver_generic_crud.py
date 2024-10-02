@@ -1,11 +1,13 @@
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import date, datetime
+from helpers.utils import retry
 
 logger = logging.getLogger(__name__)
 
 class SQLServerGenericCRUD:
-    """Generic CRUD operations for any table in SQL Server."""
+    """Enhanced Generic CRUD operations for any table in SQL Server."""
 
     def __init__(self, db_client):
         """
@@ -58,39 +60,62 @@ class SQLServerGenericCRUD:
                 record[key] = value.strftime('%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
         return record
 
-    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
+    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str], primary_key: str = None) -> Dict[str, str]:
         """
         Infer column data types based on the values provided, considering multiple rows for better accuracy.
+        Optionally mark a specified column as the PRIMARY KEY, retaining its original inferred type.
+        For INT types, dynamically determine the size based on the maximum value length. Use BIGINT if the value exceeds 11 digits.
 
         Args:
             values (list of tuples): List of tuples representing the values to insert.
             columns (list): List of column names.
+            primary_key (str, optional): Column name to be set as the PRIMARY KEY, retaining its original inferred type.
 
         Returns:
-            dict: Dictionary of column names and their inferred data types.
+            dict: Dictionary of column names and their inferred data types, with the primary key marked if specified.
         """
         types = {}
+
         if values:
             for column in columns:
-                # Loop through all rows to infer the data type across multiple values
+                inferred_type = None
+                max_int_digits = 1  # Default to 1 digit for INT columns
+
                 for row in values:
                     value = row[columns.index(column)]
+
+                    # Determine type if not already set or refine current inference
                     if isinstance(value, int):
-                        types[column] = 'INT'
+                        # Calculate the number of digits in the integer value
+                        max_int_digits = max(max_int_digits, len(str(abs(value))))
+                        if inferred_type not in ['FLOAT', 'VARCHAR(MAX)']:
+                            inferred_type = 'INT'
                     elif isinstance(value, float):
-                        types[column] = 'FLOAT'
+                        if inferred_type != 'VARCHAR(MAX)':
+                            inferred_type = 'FLOAT'
                     elif isinstance(value, str):
-                        types[column] = 'VARCHAR(MAX)'
+                        inferred_type = 'VARCHAR(MAX)'
                     elif isinstance(value, date):
-                        types[column] = 'DATE'
+                        inferred_type = 'DATE'
                     elif isinstance(value, datetime):
-                        types[column] = 'DATETIME'
+                        inferred_type = 'DATETIME'
                     else:
-                        types[column] = 'VARCHAR(MAX)'
-                    break  # Stop checking once we infer the type
+                        inferred_type = 'VARCHAR(MAX)'
+
+                # If the column is inferred as INT but exceeds 11 digits, set it as BIGINT
+                if inferred_type == 'INT' and max_int_digits > 11:
+                    inferred_type = 'BIGINT'
+
+                # If this column is the primary key, retain its type and mark it as PRIMARY KEY
+                if column == primary_key:
+                    inferred_type = f"{inferred_type} PRIMARY KEY"
+
+                # Assign inferred type to the column
+                types[column] = inferred_type or 'VARCHAR(MAX)'
+
         return types
 
-    def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> bool:
+    def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]], primary_key: str) -> bool:
         """
         Create a table with the specified columns if it does not already exist.
 
@@ -102,12 +127,22 @@ class SQLServerGenericCRUD:
         Returns:
             bool: True if the table was created, False if it already existed.
         """
+
         existing_columns = self._get_table_columns(table)
         if existing_columns:
             logger.info(f"Table '{table}' already exists.")
             return False
 
-        column_types = self._infer_column_types(values, columns)
+        # Create an ordered dictionary for column types
+        column_types = OrderedDict()
+
+        # Infer types for the remaining columns
+        inferred_types = self._infer_column_types(values, columns, primary_key)
+
+        # Update the ordered dictionary with the inferred types
+        column_types.update(inferred_types)
+
+        # Construct the column definitions
         columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
         create_query = f"CREATE TABLE {table} ({columns_def})"
 
@@ -119,7 +154,8 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to create table '{table}'. Error: {e}")
             raise
 
-    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None) -> bool:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None, primary_key: str = None) -> bool:
         """
         Create new records in the specified table.
 
@@ -131,6 +167,7 @@ class SQLServerGenericCRUD:
         Returns:
             bool: True if records were inserted successfully, False otherwise.
         """
+
         if columns is None:
             columns = self._get_table_columns(table)
 
@@ -139,7 +176,7 @@ class SQLServerGenericCRUD:
         elif not all(isinstance(v, tuple) for v in values):
             raise ValueError("Values must be a tuple or a list of tuples.")
 
-        self.create_table_if_not_exists(table, columns, values)
+        self.create_table_if_not_exists(table, columns, values, primary_key=primary_key)
 
         for value_tuple in values:
             if len(value_tuple) != len(columns):
@@ -157,6 +194,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to insert records. Error: {e}")
             return False
 
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False, batch_size: int = None) -> List[Dict[str, Any]]:
         """
         Read records from the specified table with optional batch support.
@@ -191,6 +229,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to read records. Error: {e}")
             raise
 
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> bool:
         """
         Update records in the specified table.
@@ -215,6 +254,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to update records. Error: {e}")
             return False
 
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def delete(self, table: str, where: str = "", params: Tuple[Any] = None, batch_size: int = None) -> bool:
         """
         Delete records from the specified table with optional batch processing.
@@ -242,57 +282,28 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to delete records. Error: {e}")
             return False
 
-    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None, batch: bool = False) -> Optional[List[Dict[str, Any]]]:
-        """
-        Execute a raw SQL query (SELECT or non-SELECT).
-
-        Args:
-            query (str): The SQL query to execute.
-            params (dict or list of dict, optional): A dictionary of parameters for single queries or a list of dictionaries for batch queries.
-            batch (bool, optional): If True, execute the query as a batch operation. Default is False.
-
-        Returns:
-            Optional[list]: If the query is a SELECT query, returns a list of dictionaries representing rows. Otherwise, returns None.
-        """
-        connection = self.db_client.get_new_connection()  # Ensure a new connection for this task
-        cursor = connection.cursor()
+    def begin_transaction(self):
+        """Begin a transaction."""
         try:
-            # Check if the query is a SELECT query
-            is_select_query = query.strip().lower().startswith('select')
-
-            # Handle SELECT queries
-            if is_select_query:
-                if params:
-                    cursor.execute(query, params)
-                else:
-                    cursor.execute(query)
-
-                # Fetch all rows and return as a list of dictionaries
-                columns = [column[0] for column in cursor.description]
-                rows = cursor.fetchall()
-                result = [dict(zip(columns, row)) for row in rows]
-                logger.info(f"Raw SELECT query executed successfully, {len(result)} rows fetched.")
-                return result if rows else []
-
-            # Handle non-SELECT queries (like INSERT, UPDATE, DELETE)
-            else:
-                if batch and isinstance(params, list):
-                    # Batch execution for non-SELECT queries
-                    cursor.fast_executemany = True  # Enable fast executemany
-                    cursor.executemany(query, params)
-                else:
-                    # Single execution
-                    cursor.execute(query, params or ())
-
-                connection.commit()
-                logger.info(f"Raw non-SELECT query executed successfully, affected rows: {cursor.rowcount}.")
-                return None
-
+            self.db_client.begin_transaction()
         except Exception as e:
-            logger.error(f"Failed to execute raw query. Error: {e}")
-            connection.rollback()  # Rollback in case of error
+            logger.error(f"Failed to begin transaction. Error: {e}")
             raise
-        finally:
-            # Ensure cursor and connection are closed properly
-            cursor.close()
-            connection.close()
+
+    def commit_transaction(self):
+        """Commit the current transaction."""
+        try:
+            self.db_client.commit_transaction()
+            logger.info("Transaction committed successfully.")
+        except Exception as e:
+            logger.error(f"Failed to commit transaction. Error: {e}")
+            raise
+
+    def rollback_transaction(self):
+        """Rollback the current transaction."""
+        try:
+            self.db_client.rollback_transaction()
+            logger.info("Transaction rolled back successfully.")
+        except Exception as e:
+            logger.error(f"Failed to rollback transaction. Error: {e}")
+            raise

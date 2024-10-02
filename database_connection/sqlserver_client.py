@@ -1,9 +1,16 @@
 import json
 import pyodbc
 import logging
+import queue
+from helpers.utils import retry
 from .base_database import BaseDatabase, DatabaseConnectionError
+import threading
 import time
 from typing import Any, Dict, List, Optional
+
+# Create a queue to hold failed queries
+failed_query_queue = queue.Queue()
+MAX_RETRIES = 3
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +69,7 @@ class SQLServerClient(BaseDatabase):
             logger.error(f"Error creating new SQL Server Database connection: {err}")
             raise DatabaseConnectionError(err)
 
+    @retry(max_retries=5, delay=10, backoff=2, exceptions=(pyodbc.Error,), logger=logger)
     def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
         Execute a SQL Server query with retry and timeout handling.
@@ -151,62 +159,61 @@ class SQLServerClient(BaseDatabase):
 
     def log_failed_query(self, query: str, params: Optional[Dict[str, Any]] = None, retry_count: int = 0):
         """
-        Log the failed query for future re-execution.
+        Log the failed query for future re-execution by storing it in an in-memory queue.
 
-        In case of a failure, the query is stored in the 'failed_queries' table or a log file for retry.
         Args:
             query (str): The failed query.
             params (dict, optional): Dictionary of parameters for the query. Default is None.
             retry_count (int): The current retry count for the query.
         """
         try:
-            failure_query = """
-            INSERT INTO failed_queries (query, params, failed_at, retry_count)
-            VALUES (?, ?, GETDATE(), ?)
-            """
-            cursor = self.connection.cursor()
-            cursor.execute(failure_query, query, json.dumps(params or {}), retry_count)
-            self.connection.commit()
-            logger.info("Logged failed query for retry.")
-        except pyodbc.Error as err:
+            # Instead of saving to the database, store the failed query in a queue
+            failed_query_data = {
+                'query': query,
+                'params': json.dumps(params or {}),
+                'retry_count': retry_count
+            }
+            failed_query_queue.put(failed_query_data)
+            logger.info(f"Logged failed query into the queue for retry. Retry Count: {retry_count}")
+
+        except Exception as err:
             logger.error(f"Failed to log failed query: {err}")
-            # Fallback to logging in a file if the database is not accessible
+            # Fallback to logging in a file if queuing fails
             with open('failed_queries.log', 'a') as f:
                 f.write(f"{query} | {params} | Retry Count: {retry_count}\n")
-            self.connection.rollback()
 
-    def retry_failed_queries(self):
+
+    # Function to process and retry the queries from the queue
+    def process_failed_queries(self):
         """
-        Retry all failed queries stored in the 'failed_queries' table.
-
-        Queries that failed previously will be re-executed. If they succeed, they are removed from the table.
+        Process the failed queries stored in the queue.
         """
-        try:
-            cursor = self.connection.cursor()
-            cursor.execute("SELECT id, query, params, retry_count FROM failed_queries WHERE retry_count < 5")
+        while not failed_query_queue.empty():
+            failed_query = failed_query_queue.get()
+            try:
+                query = failed_query['query']
+                params = json.loads(failed_query['params'])
+                retry_count = failed_query['retry_count']
 
-            failed_queries = cursor.fetchall()
-            for query in failed_queries:
-                query_id, query_text, params, retry_count = query
-                params = json.loads(params)
+                # Check retry count
+                if retry_count >= MAX_RETRIES:
+                    logger.warning(f"Max retries reached for query: {query}. Not retrying anymore.")
+                    continue  # Skip the query
 
-                try:
-                    cursor.execute(query_text, params)
-                    self.connection.commit()
-                    # Delete from failed queries if successful
-                    cursor.execute("DELETE FROM failed_queries WHERE id = ?", query_id)
-                    logger.info(f"Successfully re-executed failed query ID {query_id}.")
-                except pyodbc.Error as err:
-                    logger.error(f"Failed to retry query ID {query_id}: {err}")
-                    # Increment retry count
-                    cursor.execute("UPDATE failed_queries SET retry_count = retry_count + 1 WHERE id = ?", query_id)
-                    self.connection.commit()
+                # Retry the query (pseudo-code)
+                cursor = self.connection.cursor()
+                cursor.execute(query, params)
+                self.connection.commit()
+                logger.info(f"Successfully retried query: {query}")
 
-        except pyodbc.Error as err:
-            logger.error(f"Error retrying failed queries: {err}")
-        finally:
-            if cursor:
-                cursor.close()
+            except pyodbc.Error as err:
+                logger.error(f"Failed to execute query from queue: {err}")
+                retry_count += 1  # Increment the retry count
+                failed_query['retry_count'] = retry_count  # Update the retry count in the query data
+
+                # Re-add the failed query back into the queue
+                failed_query_queue.put(failed_query)
+                logger.info(f"Re-added failed query to queue with retry count {retry_count}.")
 
     def execute_query_with_savepoint(self, query: str, params: Optional[Dict[str, Any]] = None):
         """
