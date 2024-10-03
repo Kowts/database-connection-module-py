@@ -2,7 +2,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import date, datetime
-from helpers.utils import retry
+from .utils import retry
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,6 @@ class SQLServerGenericCRUD:
         """
         Infer column data types based on the values provided, considering multiple rows for better accuracy.
         Optionally mark a specified column as the PRIMARY KEY, retaining its original inferred type.
-        For INT types, dynamically determine the size based on the maximum value length. Use BIGINT if the value exceeds 11 digits.
 
         Args:
             values (list of tuples): List of tuples representing the values to insert.
@@ -84,9 +83,7 @@ class SQLServerGenericCRUD:
                 for row in values:
                     value = row[columns.index(column)]
 
-                    # Determine type if not already set or refine current inference
                     if isinstance(value, int):
-                        # Calculate the number of digits in the integer value
                         max_int_digits = max(max_int_digits, len(str(abs(value))))
                         if inferred_type not in ['FLOAT', 'VARCHAR(MAX)']:
                             inferred_type = 'INT'
@@ -102,15 +99,12 @@ class SQLServerGenericCRUD:
                     else:
                         inferred_type = 'VARCHAR(MAX)'
 
-                # If the column is inferred as INT but exceeds 11 digits, set it as BIGINT
                 if inferred_type == 'INT' and max_int_digits > 11:
                     inferred_type = 'BIGINT'
 
-                # If this column is the primary key, retain its type and mark it as PRIMARY KEY
                 if column == primary_key:
                     inferred_type = f"{inferred_type} PRIMARY KEY"
 
-                # Assign inferred type to the column
                 types[column] = inferred_type or 'VARCHAR(MAX)'
 
         return types
@@ -123,26 +117,30 @@ class SQLServerGenericCRUD:
             table (str): The name of the table to create.
             columns (list): List of column names.
             values (list of tuples): List of tuples representing the values to insert.
+            primary_key (str): The column to set as the primary key.
 
         Returns:
             bool: True if the table was created, False if it already existed.
         """
-
+        # Get the existing columns in the table
         existing_columns = self._get_table_columns(table)
         if existing_columns:
             logger.info(f"Table '{table}' already exists.")
             return False
 
-        # Create an ordered dictionary for column types
-        column_types = OrderedDict()
+        # Ensure the primary key column is in the columns list
+        if primary_key not in columns:
+            logger.info(f"Primary key column '{primary_key}' not found in columns. Adding it.")
+            columns.append(primary_key)
 
-        # Infer types for the remaining columns
+        # Infer column types based on the provided values
+        column_types = OrderedDict()
         inferred_types = self._infer_column_types(values, columns, primary_key)
 
         # Update the ordered dictionary with the inferred types
         column_types.update(inferred_types)
 
-        # Construct the column definitions
+        # Construct the column definitions for the CREATE TABLE query
         columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
         create_query = f"CREATE TABLE {table} ({columns_def})"
 
@@ -167,7 +165,6 @@ class SQLServerGenericCRUD:
         Returns:
             bool: True if records were inserted successfully, False otherwise.
         """
-
         if columns is None:
             columns = self._get_table_columns(table)
 

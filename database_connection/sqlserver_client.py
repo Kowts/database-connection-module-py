@@ -2,7 +2,7 @@ import json
 import pyodbc
 import logging
 import queue
-from helpers.utils import retry
+from .utils import retry
 from .base_database import BaseDatabase, DatabaseConnectionError
 import threading
 import time
@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional
 # Create a queue to hold failed queries
 failed_query_queue = queue.Queue()
 MAX_RETRIES = 3
+
+# Thread lock for concurrency handling
+queue_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +73,7 @@ class SQLServerClient(BaseDatabase):
             raise DatabaseConnectionError(err)
 
     @retry(max_retries=5, delay=10, backoff=2, exceptions=(pyodbc.Error,), logger=logger)
-    def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False) -> Optional[List[Dict[str, Any]]]:
+    def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False, timeout: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
         """
         Execute a SQL Server query with retry and timeout handling.
 
@@ -78,6 +81,7 @@ class SQLServerClient(BaseDatabase):
             query (str): The SQL query to execute.
             params (dict, optional): Dictionary of parameters to bind to the query. Default is None.
             fetch_as_dict (bool, optional): If True, fetch results as a list of dictionaries. Default is False.
+            timeout (int, optional): Query-specific timeout (in seconds). If not provided, uses default timeout.
 
         Returns:
             Optional[list]: A list of dictionaries if fetch_as_dict is True and it's a SELECT query.
@@ -87,9 +91,11 @@ class SQLServerClient(BaseDatabase):
         cursor = None
         try:
             cursor = self.connection.cursor()
+            if timeout:
+                cursor.timeout = timeout  # Apply query-specific timeout
+
             cursor.execute(query, params or ())
 
-            # Fetch the results if it's a SELECT query
             if query.strip().lower().startswith("select"):
                 if fetch_as_dict:
                     columns = [column[0] for column in cursor.description]
@@ -99,27 +105,23 @@ class SQLServerClient(BaseDatabase):
                 else:
                     return cursor.fetchall()
 
-            # Commit the transaction for non-SELECT queries
-            self.connection.commit()
+            self.connection.commit()  # Commit the transaction for non-SELECT queries
             return cursor.rowcount
 
         except pyodbc.Error as err:
-            # Handle specific SQL errors like deadlock or timeouts
             if '1205' in str(err):
                 logger.error(f"Deadlock detected, retrying: {err}")
             elif 'SQLSTATE_TIMEOUT' in str(err):
                 logger.error(f"Query timeout occurred: {err}")
             else:
                 logger.error(f"Failed to execute query. Error: {err}")
-
-            # Log the failed query for retry
             self.log_failed_query(query, params)
             self.connection.rollback()  # Ensure rollback on failure
             raise
 
         finally:
             if cursor:
-                cursor.close()  # Ensure cursor is closed
+                cursor.close()
             elapsed_time = time.time() - start_time
             if elapsed_time > self.config.get('long_query_threshold', 60):
                 logger.warning(f"Query took too long ({elapsed_time} seconds): {query}")
@@ -182,25 +184,23 @@ class SQLServerClient(BaseDatabase):
             with open('failed_queries.log', 'a') as f:
                 f.write(f"{query} | {params} | Retry Count: {retry_count}\n")
 
-
-    # Function to process and retry the queries from the queue
     def process_failed_queries(self):
         """
-        Process the failed queries stored in the queue.
+        Process the failed queries stored in the queue with thread-safety.
         """
         while not failed_query_queue.empty():
-            failed_query = failed_query_queue.get()
+            with queue_lock:
+                failed_query = failed_query_queue.get()
+
             try:
                 query = failed_query['query']
                 params = json.loads(failed_query['params'])
                 retry_count = failed_query['retry_count']
 
-                # Check retry count
                 if retry_count >= MAX_RETRIES:
                     logger.warning(f"Max retries reached for query: {query}. Not retrying anymore.")
-                    continue  # Skip the query
+                    continue
 
-                # Retry the query (pseudo-code)
                 cursor = self.connection.cursor()
                 cursor.execute(query, params)
                 self.connection.commit()
@@ -208,11 +208,11 @@ class SQLServerClient(BaseDatabase):
 
             except pyodbc.Error as err:
                 logger.error(f"Failed to execute query from queue: {err}")
-                retry_count += 1  # Increment the retry count
-                failed_query['retry_count'] = retry_count  # Update the retry count in the query data
+                retry_count += 1
+                failed_query['retry_count'] = retry_count
 
-                # Re-add the failed query back into the queue
-                failed_query_queue.put(failed_query)
+                with queue_lock:
+                    failed_query_queue.put(failed_query)
                 logger.info(f"Re-added failed query to queue with retry count {retry_count}.")
 
     def execute_query_with_savepoint(self, query: str, params: Optional[Dict[str, Any]] = None):
@@ -298,9 +298,3 @@ class SQLServerClient(BaseDatabase):
         except pyodbc.Error as err:
             logger.error(f"Failed to rollback transaction. Error: {err}")
             raise
-
-    def disconnect(self):
-        """Close the SQL Server database connection."""
-        if self.connection:
-            self.connection.close()
-            logger.info("SQL Server Database disconnected successfully.")
