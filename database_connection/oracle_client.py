@@ -2,6 +2,9 @@ import cx_Oracle
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
 from contextlib import contextmanager
+from .utils import retry
+import time
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -69,22 +72,22 @@ class OracleClient(BaseDatabase):
         """
         connection = None
         try:
-            # Get a connection from the pool
             connection = self.pool.acquire()
             yield connection
         finally:
             if connection:
-                # Return the connection to the pool
                 self.pool.release(connection)
 
-    def execute_query(self, query, params=None, fetch_as_dict=False):
+    @retry(max_retries=5, delay=10, backoff=2, exceptions=(cx_Oracle.Error,), logger=logger)
+    def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False, timeout: Optional[int] = None) -> Any:
         """
-        Execute an Oracle database query.
+        Execute an Oracle database query with retry and timeout handling.
 
         Args:
             query (str): The query to be executed.
-            params (tuple or dict, optional): Parameters for the query.
+            params (dict or tuple, optional): Parameters for the query.
             fetch_as_dict (bool, optional): Whether to fetch results as dictionaries.
+            timeout (int, optional): Query-specific timeout (in seconds). If not provided, uses default timeout.
 
         Returns:
             list: Result of the query execution if it is a SELECT query.
@@ -93,10 +96,14 @@ class OracleClient(BaseDatabase):
         Raises:
             DatabaseConnectionError: If there is an error executing the query.
         """
+        start_time = time.time()
         with self.get_connection() as connection:
             try:
                 cursor = connection.cursor()
+                if timeout:
+                    connection.callTimeout = timeout * 1000  # Oracle uses milliseconds for timeout
                 cursor.execute(query, params or {})
+
                 if query.strip().lower().startswith("select"):
                     if fetch_as_dict:
                         columns = [col[0] for col in cursor.description]
@@ -107,12 +114,18 @@ class OracleClient(BaseDatabase):
                     result = cursor.rowcount
                     connection.commit()
                 return result
+
             except cx_Oracle.Error as err:
                 logger.error(f"Error executing query: {err}")
                 connection.rollback()
                 raise DatabaseConnectionError(err)
 
-    def execute_batch_query(self, query, values):
+            finally:
+                elapsed_time = time.time() - start_time
+                if elapsed_time > self.config.get('long_query_threshold', 60):
+                    logger.warning(f"Query took too long ({elapsed_time} seconds): {query}")
+
+    def execute_batch_query(self, query: str, values: List[tuple]):
         """
         Execute a batch of Oracle database queries.
 
@@ -134,7 +147,7 @@ class OracleClient(BaseDatabase):
                 logger.error(f"Error executing batch query: {err}")
                 raise DatabaseConnectionError(err)
 
-    def execute_transaction(self, queries):
+    def execute_transaction(self, queries: List[tuple]):
         """
         Execute a series of queries as a transaction.
 
@@ -155,3 +168,18 @@ class OracleClient(BaseDatabase):
                 connection.rollback()
                 logger.error(f"Error executing transaction: {err}")
                 raise DatabaseConnectionError(err)
+
+    def log_failed_query(self, query: str, params: Optional[Dict[str, Any]] = None):
+        """
+        Log the failed query for future debugging.
+
+        Args:
+            query (str): The failed query.
+            params (dict or tuple, optional): Parameters for the query.
+        """
+        try:
+            logger.error(f"Failed query: {query} | Params: {params}")
+            with open('failed_queries.log', 'a') as f:
+                f.write(f"{query} | {params}\n")
+        except Exception as err:
+            logger.error(f"Failed to log query: {err}")

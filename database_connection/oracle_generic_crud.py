@@ -1,11 +1,12 @@
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import date, datetime
+from .utils import retry
 
 logger = logging.getLogger(__name__)
 
 class OracleGenericCRUD:
-    """Generic CRUD operations for any table."""
+    """Generic CRUD operations for any Oracle table."""
 
     def __init__(self, db_client):
         """
@@ -59,13 +60,14 @@ class OracleGenericCRUD:
                 record[key] = value.strftime('%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
         return record
 
-    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
+    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str], primary_key: str = None) -> Dict[str, str]:
         """
         Infer column data types based on provided values.
 
         Args:
             values (list of tuples): List of tuples representing rows of data.
             columns (list of str): List of column names.
+            primary_key (str, optional): Primary key column name to include.
 
         Returns:
             dict: A dictionary mapping column names to their inferred Oracle data types.
@@ -86,9 +88,13 @@ class OracleGenericCRUD:
             else:
                 inferred_types[column] = type_mapping.get(type(sample_value), "VARCHAR2(255)")
 
+            # If the column is the primary key, mark it accordingly
+            if column == primary_key:
+                inferred_types[column] += " PRIMARY KEY"
+
         return inferred_types
 
-    def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> None:
+    def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]], primary_key: str = None) -> None:
         """
         Create a table with the specified columns if it does not already exist.
 
@@ -96,6 +102,10 @@ class OracleGenericCRUD:
             table (str): The name of the table to create.
             columns (list): List of column names.
             values (list of tuples): List of tuples representing the values to insert.
+            primary_key (str, optional): The column to set as primary key.
+
+        Returns:
+            None
         """
         try:
             # Check if the table exists
@@ -104,8 +114,13 @@ class OracleGenericCRUD:
                 logger.info(f"Table '{table}' already exists.")
                 return
 
+            # Ensure primary key is in the list of columns
+            if primary_key and primary_key not in columns:
+                logger.info(f"Primary key '{primary_key}' not found in columns. Adding it.")
+                columns.append(primary_key)
+
             # Infer column data types
-            column_types = self._infer_column_types(values, columns)
+            column_types = self._infer_column_types(values, columns, primary_key)
 
             # Generate the CREATE TABLE query
             columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
@@ -118,7 +133,8 @@ class OracleGenericCRUD:
             logger.error(f"Failed to create table '{table}'. Error: {e}")
             raise
 
-    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None) -> None:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None, primary_key: str = None) -> bool:
         """
         Create new records in the specified table.
 
@@ -126,6 +142,10 @@ class OracleGenericCRUD:
             table (str): The table name.
             values (list of tuples): List of tuples of values to insert.
             columns (list, optional): List of column names. If None, columns will be inferred from the table schema.
+            primary_key (str, optional): Primary key column name.
+
+        Returns:
+            bool: True if records were inserted successfully, False otherwise.
         """
         if columns is None:
             columns = self._get_table_columns(table)
@@ -137,7 +157,7 @@ class OracleGenericCRUD:
             raise ValueError("Values must be a tuple or a list of tuples.")
 
         # Create the table if it doesn't exist
-        self.create_table_if_not_exists(table, columns, values)
+        self.create_table_if_not_exists(table, columns, values, primary_key)
 
         for value_tuple in values:
             if len(value_tuple) != len(columns):
@@ -153,11 +173,12 @@ class OracleGenericCRUD:
             return True
         except Exception as e:
             logger.error(f"Failed to insert records. Error: {e}")
-            raise
+            return False
 
-    def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False) -> List[Dict[str, Any]]:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False, batch_size: int = None) -> List[Dict[str, Any]]:
         """
-        Read records from the specified table.
+        Read records from the specified table with optional batch support.
 
         Args:
             table (str): The table name.
@@ -165,6 +186,7 @@ class OracleGenericCRUD:
             where (str, optional): WHERE clause for filtering records.
             params (tuple, optional): Tuple of parameters for the WHERE clause.
             show_id (bool, optional): If True, include the 'id' column. Default is False.
+            batch_size (int, optional): If provided, limits the number of records returned per batch.
 
         Returns:
             list: List of records as dictionaries.
@@ -176,16 +198,20 @@ class OracleGenericCRUD:
         query = f"SELECT {columns_str} FROM {table}"
         if where:
             query += f" WHERE {where}"
+        if batch_size:
+            query += f" FETCH NEXT {batch_size} ROWS ONLY"
+
         try:
-            result = self.db_client.execute_query(query, params, fetch_as_dict=False)
-            records = [self._format_dates(dict(zip(columns, row))) for row in result]
-            logger.info("Records found.")
+            result = self.db_client.execute_query(query, params, fetch_as_dict=True)
+            records = [self._format_dates(row) for row in result]
+            logger.info(f"Records read successfully, {len(records)} rows found.")
             return records
         except Exception as e:
             logger.error(f"Failed to read records. Error: {e}")
             raise
 
-    def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> None:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> bool:
         """
         Update records in the specified table.
 
@@ -194,19 +220,23 @@ class OracleGenericCRUD:
             updates (dict): Dictionary of columns and their new values.
             where (str): WHERE clause for identifying records to update.
             params (tuple): Tuple of parameters for the WHERE clause.
+
+        Returns:
+            bool: True if records were updated successfully, False otherwise.
         """
         set_clause = ", ".join([f"{col} = :{i+1}" for i, col in enumerate(updates.keys(), 1)])
         query = f"UPDATE {table} SET {set_clause} WHERE {where}"
         values = tuple(updates.values()) + params
         try:
             self.db_client.execute_query(query, values)
-            logger.info("Records updated.")
+            logger.info("Records updated successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to update records. Error: {e}")
-            raise
+            return False
 
-    def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> None:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> bool:
         """
         Delete records from the specified table.
 
@@ -214,42 +244,44 @@ class OracleGenericCRUD:
             table (str): The table name.
             where (str, optional): WHERE clause for identifying records to delete. If empty, all records will be deleted.
             params (tuple, optional): Tuple of parameters for the WHERE clause.
+
+        Returns:
+            bool: True if records were deleted successfully, False otherwise.
         """
         query = f"DELETE FROM {table}"
         if where:
             query += f" WHERE {where}"
+
         try:
             self.db_client.execute_query(query, params)
-            logger.info("Records deleted")
+            logger.info("Records deleted successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to delete records. Error: {e}")
+            return False
+
+    def begin_transaction(self):
+        """Begin a transaction."""
+        try:
+            self.db_client.begin_transaction()
+        except Exception as e:
+            logger.error(f"Failed to begin transaction. Error: {e}")
             raise
 
-    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
-        """
-        Execute a raw SQL query.
-
-        Args:
-            query (str): The SQL query to execute.
-            params (dict, optional): Dictionary of parameters to bind to the query. Default is None.
-
-        Returns:
-            Optional[list]: If the query is a SELECT query, returns a list of dictionaries representing rows with formatted date fields. Otherwise, returns None.
-        """
+    def commit_transaction(self):
+        """Commit the current transaction."""
         try:
-            is_select_query = query.strip().lower().startswith('select')
-            if is_select_query:
-                # Execute the SELECT query and get results as a list of dictionaries
-                result = self.db_client.execute_query(query, params, fetch_as_dict=True)
-                # Format dates in each record
-                formatted_result = [self._format_dates(record) for record in result]
-                return formatted_result
-            else:
-                # Execute the non-SELECT query
-                self.db_client.execute_query(query, params)
-                logger.info("Query executed successfully.")
-                return None
+            self.db_client.commit_transaction()
+            logger.info("Transaction committed successfully.")
         except Exception as e:
-            logger.error(f"Failed to execute raw query. Error: {e}")
+            logger.error(f"Failed to commit transaction. Error: {e}")
+            raise
+
+    def rollback_transaction(self):
+        """Rollback the current transaction."""
+        try:
+            self.db_client.rollback_transaction()
+            logger.info("Transaction rolled back successfully.")
+        except Exception as e:
+            logger.error(f"Failed to rollback transaction. Error: {e}")
             raise
