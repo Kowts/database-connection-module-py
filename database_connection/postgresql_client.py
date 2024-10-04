@@ -37,13 +37,29 @@ class PostgreSQLClient(BaseDatabase):
             logger.error(f"Error creating PostgreSQL connection pool: {err}")
             raise DatabaseConnectionError(err)
 
+    def is_connected(self):
+        """Check if the connection pool is active and connections are available."""
+        if self.connection_pool is None:
+            return False
+
+        try:
+            # Attempt to get a connection from the pool without reserving it
+            connection = self.connection_pool.getconn()
+            self.connection_pool.putconn(connection)
+            return True
+        except (OperationalError, DatabaseError):
+            logger.error("Unable to get a connection from the pool.")
+            return False
+
     def disconnect(self):
         """Close the PostgreSQL database connection pool."""
         if self.connection_pool:
             self.connection_pool.closeall()
             logger.info("PostgreSQL connection pool closed successfully.")
+            self.connection_pool = None  # Set to None to mark it as closed
         else:
-            logger.warning("No connection pool found to close.")
+            logger.warning("Connection pool is already closed.")
+
 
     @contextmanager
     def get_connection(self):
