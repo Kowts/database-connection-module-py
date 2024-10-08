@@ -99,7 +99,7 @@ class SQLServerGenericCRUD:
                     else:
                         inferred_type = 'VARCHAR(MAX)'
 
-                if inferred_type == 'INT' and max_int_digits > 11:
+                if inferred_type == 'INT' and max_int_digits >= 11:
                     inferred_type = 'BIGINT'
 
                 if column == primary_key:

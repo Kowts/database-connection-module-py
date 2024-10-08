@@ -2,7 +2,7 @@ import cx_Oracle
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
 from contextlib import contextmanager
-from helpers.utils import retry
+from .utils import retry
 import time
 from typing import Any, Dict, List, Optional
 
