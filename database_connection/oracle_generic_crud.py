@@ -1,7 +1,8 @@
+import re
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import date, datetime
-from .utils import retry
+from helpers.utils import retry
 
 logger = logging.getLogger(__name__)
 
@@ -28,21 +29,32 @@ class OracleGenericCRUD:
         Returns:
             list: List of column names.
         """
+        # Use string concatenation for table name instead of bind variable
+        # since Oracle doesn't support bind variables for object names
         query = f"""
-        SELECT COLUMN_NAME
-        FROM ALL_TAB_COLUMNS
-        WHERE TABLE_NAME = :table
+            SELECT COLUMN_NAME
+            FROM ALL_TAB_COLUMNS
+            WHERE TABLE_NAME = '{table.upper()}'
         """
+
         if not show_id:
-            query += "AND COLUMN_NAME != 'ID' "
-        query += "ORDER BY COLUMN_ID"
+            query += " AND COLUMN_NAME != 'ID'"
+
+        query += " ORDER BY COLUMN_ID"
 
         try:
-            result = self.db_client.execute_query(query, {'table': table.upper()}, fetch_as_dict=True)
+            # Execute the query without params since we're using string concatenation
+            result = self.db_client.execute_query(query, None, fetch_as_dict=True)
+
+            # Extract the column names from the result
             columns = [row['COLUMN_NAME'] for row in result]
+
+            logger.debug(f"Retrieved columns for table {table}: {columns}")
             return columns
         except Exception as e:
-            logger.error(f"Failed to get table columns. Error: {e}")
+            # Log detailed error messages including query and table name
+            logger.error(f"Error getting columns for table {table}. Query: {query}")
+            logger.error(f"Failed to get table columns. Error: {str(e)}")
             raise
 
     def _format_dates(self, record: Dict[str, Any]) -> Dict[str, Any]:
@@ -94,6 +106,12 @@ class OracleGenericCRUD:
 
         return inferred_types
 
+    def _validate_table_name(self, table_name: str) -> bool:
+        """Validate that a table name contains only allowed characters."""
+        # Only allow alphanumeric characters and underscores
+        pattern = re.compile(r'^[A-Za-z0-9_]+$')
+        return bool(pattern.match(table_name))
+
     def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]], primary_key: str = None) -> None:
         """
         Create a table with the specified columns if it does not already exist.
@@ -108,9 +126,20 @@ class OracleGenericCRUD:
             None
         """
         try:
-            # Check if the table exists
-            existing_columns = self._get_table_columns(table)
-            if existing_columns:
+
+            # Validate table name before using it in query
+            if not self._validate_table_name(table):
+                raise ValueError(f"Invalid table name: {table}")
+
+            # First check if the table exists using a different query
+            check_query = f"""
+                SELECT COUNT(*) AS TABLE_COUNT
+                FROM ALL_TABLES
+                WHERE TABLE_NAME = '{table.upper()}'
+            """
+            result = self.db_client.execute_query(check_query, None, fetch_as_dict=True)
+            table_exists = result[0]['TABLE_COUNT'] > 0
+            if table_exists:
                 logger.info(f"Table '{table}' already exists.")
                 return
 
@@ -130,7 +159,7 @@ class OracleGenericCRUD:
             self.db_client.execute_query(create_query)
             logger.info(f"Table '{table}' created successfully.")
         except Exception as e:
-            logger.error(f"Failed to create table '{table}'. Error: {e}")
+            logger.error(f"Failed to create table '{table}'. Error: {str(e)}")
             raise
 
     @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)

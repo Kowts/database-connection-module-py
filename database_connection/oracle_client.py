@@ -2,7 +2,7 @@ import cx_Oracle
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
 from contextlib import contextmanager
-from .utils import retry
+from helpers.utils import retry
 import time
 from typing import Any, Dict, List, Optional
 
@@ -99,11 +99,15 @@ class OracleClient(BaseDatabase):
         start_time = time.time()
         with self.get_connection() as connection:
             try:
+                # Create a cursor for the connection
                 cursor = connection.cursor()
                 if timeout:
                     connection.callTimeout = timeout * 1000  # Oracle uses milliseconds for timeout
+
+                # Execute the query
                 cursor.execute(query, params or {})
 
+                # Fetch results if it is a SELECT query
                 if query.strip().lower().startswith("select"):
                     if fetch_as_dict:
                         columns = [col[0] for col in cursor.description]
