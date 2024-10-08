@@ -1,4 +1,4 @@
-import cx_Oracle
+import oracledb
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
 from contextlib import contextmanager
@@ -24,37 +24,36 @@ class OracleClient(BaseDatabase):
     def connect(self):
         """Establish a connection pool to the Oracle database."""
         try:
+
             # Initialize Oracle client if necessary
-            cx_Oracle.init_oracle_client(lib_dir=r"C:\Program Files\PremiumSoft\Navicat Premium 16\instantclient_11_2")
+            # Note: init_oracle_client is called automatically by python-oracledb when needed
+            oracledb.init_oracle_client(lib_dir=r"path_to\instantclient_11_2")
 
-            # Use service_name or sid based on configuration
             if 'service_name' in self.config:
-                dsn = cx_Oracle.makedsn(
-                    self.config['host'], self.config['port'], service_name=self.config['service_name'])
+                dsn = oracledb.makedsn(self.config['host'], self.config['port'], service_name=self.config['service_name'])
             elif 'sid' in self.config:
-                dsn = cx_Oracle.makedsn(
-                    self.config['host'], self.config['port'], sid=self.config['sid'])
+                dsn = oracledb.makedsn(self.config['host'], self.config['port'], sid=self.config['sid'])
             else:
-                raise ValueError(
-                    "Either 'service_name' or 'sid' must be provided in the configuration.")
+                raise ValueError("Either 'service_name' or 'sid' must be provided in the configuration.")
 
-            # Create a connection pool for efficient connection management
-            self.pool = cx_Oracle.SessionPool(
+            # Create a connection pool
+            self.pool = oracledb.create_pool(
                 user=self.config['user'],
                 password=self.config['password'],
                 dsn=dsn,
-                min=2,  # Minimum number of connections in the pool
-                max=10,  # Maximum number of connections in the pool
-                increment=1,  # Increment by 1 connection when more are needed
-                threaded=True,  # Allow multithreading
-                encoding="UTF-8"
+                min=2,
+                max=10,
+                increment=1,
+                threaded=True,
+                ping_interval=60
             )
 
             logger.info("Oracle connection pool created successfully.")
-        except cx_Oracle.Error as err:
+        except oracledb.Error as err:  # Updated exception handling
             error, = err.args
             logger.error(f"Error creating Oracle connection pool: {error.message}")
             raise DatabaseConnectionError(error.message)
+
 
     def disconnect(self):
         """Close the Oracle connection pool."""
@@ -68,17 +67,17 @@ class OracleClient(BaseDatabase):
         Context manager for getting a connection from the pool.
 
         Yields:
-            cx_Oracle.Connection: A connection object from the pool.
+            oracledb.Connection: A connection object from the pool.
         """
         connection = None
         try:
-            connection = self.pool.acquire()
+            connection = self.pool.acquire(timeout=30)
             yield connection
         finally:
             if connection:
                 self.pool.release(connection)
 
-    @retry(max_retries=5, delay=10, backoff=2, exceptions=(cx_Oracle.Error,), logger=logger)
+    @retry(max_retries=5, delay=10, backoff=2, exceptions=(oracledb.Error,), logger=logger)
     def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False, timeout: Optional[int] = None) -> Any:
         """
         Execute an Oracle database query with retry and timeout handling.
@@ -102,7 +101,7 @@ class OracleClient(BaseDatabase):
                 # Create a cursor for the connection
                 cursor = connection.cursor()
                 if timeout:
-                    connection.callTimeout = timeout * 1000  # Oracle uses milliseconds for timeout
+                    connection.call_timeout = timeout * 1000  # Oracle uses milliseconds for timeout
 
                 # Execute the query
                 cursor.execute(query, params or {})
@@ -119,7 +118,7 @@ class OracleClient(BaseDatabase):
                     connection.commit()
                 return result
 
-            except cx_Oracle.Error as err:
+            except oracledb.Error as err:
                 logger.error(f"Error executing query: {err}")
                 connection.rollback()
                 raise DatabaseConnectionError(err)
@@ -146,7 +145,7 @@ class OracleClient(BaseDatabase):
                 cursor.executemany(query, values)
                 connection.commit()
                 logger.info("Batch query executed successfully.")
-            except cx_Oracle.Error as err:
+            except oracledb.Error as err:
                 connection.rollback()
                 logger.error(f"Error executing batch query: {err}")
                 raise DatabaseConnectionError(err)
@@ -168,7 +167,7 @@ class OracleClient(BaseDatabase):
                     cursor.execute(query, params)
                 connection.commit()
                 logger.info("Transaction committed successfully.")
-            except cx_Oracle.Error as err:
+            except oracledb.Error as err:
                 connection.rollback()
                 logger.error(f"Error executing transaction: {err}")
                 raise DatabaseConnectionError(err)
