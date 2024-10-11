@@ -2,7 +2,7 @@ import oracledb
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
 from contextlib import contextmanager
-from .utils import retry
+from utils import retry_etl
 import time
 from typing import Any, Dict, List, Optional
 
@@ -27,7 +27,7 @@ class OracleClient(BaseDatabase):
 
             # Initialize Oracle client if necessary
             # Note: init_oracle_client is called automatically by python-oracledb when needed
-            oracledb.init_oracle_client(lib_dir=r"path_to\instantclient_11_2")
+            oracledb.init_oracle_client(lib_dir=r"C:\Program Files\PremiumSoft\Navicat Premium 16\instantclient_11_2")
 
             if 'service_name' in self.config:
                 dsn = oracledb.makedsn(self.config['host'], self.config['port'], service_name=self.config['service_name'])
@@ -44,7 +44,9 @@ class OracleClient(BaseDatabase):
                 min=2,
                 max=10,
                 increment=1,
-                threaded=True,
+                timeout=30,
+                wait_timeout=10000,
+                max_lifetime_session=28800,
                 ping_interval=60
             )
 
@@ -53,7 +55,6 @@ class OracleClient(BaseDatabase):
             error, = err.args
             logger.error(f"Error creating Oracle connection pool: {error.message}")
             raise DatabaseConnectionError(error.message)
-
 
     def disconnect(self):
         """Close the Oracle connection pool."""
@@ -71,13 +72,13 @@ class OracleClient(BaseDatabase):
         """
         connection = None
         try:
-            connection = self.pool.acquire(timeout=30)
+            connection = self.pool.acquire()
             yield connection
         finally:
             if connection:
                 self.pool.release(connection)
 
-    @retry(max_retries=5, delay=10, backoff=2, exceptions=(oracledb.Error,), logger=logger)
+    @retry_etl(max_retries=5, delay=10, backoff=2, exceptions=(oracledb.Error,), logger=logger)
     def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False, timeout: Optional[int] = None) -> Any:
         """
         Execute an Oracle database query with retry and timeout handling.

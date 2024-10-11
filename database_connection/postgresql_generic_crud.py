@@ -1,10 +1,9 @@
-from collections import OrderedDict
-import json
 from typing import Any, Dict, List, Tuple
 import logging
 from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
+
 
 class PostgresqlGenericCRUD:
     """Generic CRUD operations for any table."""
@@ -18,6 +17,24 @@ class PostgresqlGenericCRUD:
         """
         self.db_client = db_client
 
+    def ensure_tuple(self, values: List[Any]) -> List[Tuple[Any]]:
+        """
+        Ensure that all items in the values list are tuples. If an item is a list, convert it to a tuple.
+
+        Args:
+            values (list): List of values that need to be tuples.
+
+        Returns:
+            list of tuples: All items in the list are converted to tuples if they aren't already.
+        """
+        if not isinstance(values, list):
+            # If values is not a list, wrap it in a list
+            values = [values]
+
+        # Convert all items in the list to tuples if they are not already tuples
+        return [tuple(v) if not isinstance(v, tuple) else v for v in values]
+
+
     def _get_table_columns(self, table: str, show_id: bool = False) -> List[str]:
         """
         Get the column names of a table, optionally including the 'id' column.
@@ -29,7 +46,7 @@ class PostgresqlGenericCRUD:
         Returns:
             list: List of column names.
         """
-        query = """
+        query = f"""
         SELECT COLUMN_NAME
         FROM information_schema.COLUMNS
         WHERE TABLE_NAME = %s
@@ -44,99 +61,8 @@ class PostgresqlGenericCRUD:
             columns = [row['column_name'] for row in result]
             return columns
         except Exception as e:
-            logger.error(f"Failed to get table columns for table '{table}'. Error: {e}")
+            logger.error(f"Failed to get table columns. Error: {e}")
             raise
-
-    def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]]) -> bool:
-        """
-        Create a table with the specified columns if it does not already exist.
-
-        Args:
-            table (str): The name of the table to create.
-            columns (list): List of column names.
-            values (list of tuples): List of tuples representing the values to insert.
-
-        Returns:
-            bool: True if the table was created, False if it already existed.
-        """
-        existing_columns = self._get_table_columns(table)
-        if existing_columns:
-            logger.info(f"Table '{table}' already exists.")
-            return False
-
-        # Create an ordered dictionary for column types
-        column_types = OrderedDict()
-
-        # Add 'id' column as the first entry
-        column_types['id'] = 'SERIAL PRIMARY KEY'  # Define 'id' as an auto-incrementing primary key
-
-        # Infer types for the remaining columns
-        inferred_types = self._infer_column_types(values, columns)
-
-        # Update the ordered dictionary with the inferred types
-        column_types.update(inferred_types)
-
-        # Construct the column definitions
-        columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
-        create_query = f"CREATE TABLE {table} ({columns_def})"
-
-        try:
-            self.db_client.execute_query(create_query)
-            logger.info(f"Table '{table}' created successfully with 'id' column.")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to create table '{table}'. Error: {e}")
-            raise
-
-    def escape_column_name(self, column_name: str) -> str:
-        """
-        Escape reserved SQL keywords used as column names by enclosing them in double quotes.
-        """
-        reserved_keywords = {'from', 'select', 'table', 'order', 'group'}  # Add more keywords if necessary
-        if column_name.lower() in reserved_keywords:
-            return f'"{column_name}"'
-        return column_name
-
-    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str]) -> Dict[str, str]:
-        """
-        Infer column data types based on the values provided.
-
-        Args:
-            values (list of tuples): List of tuples representing the values to insert.
-            columns (list): List of column names.
-
-        Returns:
-            dict: Dictionary of column names and their inferred data types.
-        """
-        types = {}
-        if values:
-            sample = values[0]  # Use the first row of values for type inference
-            for column, value in zip(columns, sample):
-                if isinstance(value, int):
-                    types[column] = 'INT'
-                elif isinstance(value, float):
-                    types[column] = 'FLOAT'
-                elif isinstance(value, str):
-                    types[column] = 'TEXT'
-                elif isinstance(value, dict):
-                    # Use JSONB type for dictionaries
-                    types[column] = 'JSONB'
-                elif isinstance(value, list):
-                    # Check if the list contains dictionaries or mixed types
-                    if all(isinstance(i, dict) for i in value):
-                        types[column] = 'JSONB'  # Store lists of dictionaries as JSONB
-                    elif all(isinstance(i, (int, str)) for i in value):
-                        types[column] = 'TEXT[]' if isinstance(value[0], str) else 'INT[]'  # Handle lists of strings or integers
-                    else:
-                        # For mixed or unknown types in the list, store as JSONB
-                        types[column] = 'JSONB'
-                elif isinstance(value, date):
-                    types[column] = 'DATE'
-                elif isinstance(value, datetime):
-                    types[column] = 'TIMESTAMP'
-                else:
-                    types[column] = 'TEXT'  # Default to TEXT for any other types
-        return types
 
     def _format_dates(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -165,26 +91,8 @@ class PostgresqlGenericCRUD:
         if columns is None:
             columns = self._get_table_columns(table)
 
-        # Ensure values is a list of tuples
-        if not isinstance(values, list):
-            values = [values]
-        elif not all(isinstance(v, tuple) for v in values):
-            raise ValueError("Values must be a tuple or a list of tuples.")
-
-        # Convert dicts and lists of dicts to JSON
-        def convert_value(value):
-            if isinstance(value, dict) or isinstance(value, list):
-                # Convert dicts or lists (such as lists of dictionaries) to JSON
-                return json.dumps(value)
-            return value  # Return the original value if no conversion is needed
-
-        # Apply conversion to each value in the tuples
-        values = [
-            tuple(convert_value(v) for v in value_tuple)
-            for value_tuple in values
-        ]
-
-        self.create_table_if_not_exists(table, columns, values)
+        # Ensure all values are tuples
+        values = self.ensure_tuple(values)
 
         for value_tuple in values:
             if len(value_tuple) != len(columns):
@@ -196,10 +104,10 @@ class PostgresqlGenericCRUD:
 
         try:
             self.db_client.execute_batch_query(query, values)
-            logger.info(f"Records inserted into table '{table}'.")
+            logger.info("Records inserted.")
             return True
         except Exception as e:
-            logger.error(f"Failed to insert records into table '{table}'. Error: {e}")
+            logger.error(f"Failed to insert records. Error: {e}")
             raise
 
     def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False) -> List[Dict[str, Any]]:
@@ -219,20 +127,19 @@ class PostgresqlGenericCRUD:
         if columns is None:
             columns = self._get_table_columns(table, show_id=show_id)
 
-        # Escape column names if necessary
-        columns_str = ", ".join([self.escape_column_name(col) for col in columns])
-
+        columns_str = ", ".join(columns) if columns else "*"
         query = f"SELECT {columns_str} FROM {table}"
         if where:
             query += f" WHERE {where}"
-
         try:
-            result = self.db_client.execute_query(query, params, fetch_as_dict=True)
-            records = [self._format_dates(row) for row in result]
-            logger.info(f"Records retrieved from table '{table}'.")
+            result = self.db_client.execute_query(
+                query, params, fetch_as_dict=False)
+            records = [self._format_dates(
+                dict(zip(columns, row))) for row in result]
+            logger.info("Records found.")
             return records
         except Exception as e:
-            logger.error(f"Failed to read records from table '{table}'. Error: {e}")
+            logger.error(f"Failed to read records. Error: {e}")
             raise
 
     def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> None:
@@ -250,10 +157,10 @@ class PostgresqlGenericCRUD:
         values = tuple(updates.values()) + params
         try:
             self.db_client.execute_query(query, values)
-            logger.info(f"Records updated in table '{table}'.")
+            logger.info("Records updated.")
             return True
         except Exception as e:
-            logger.error(f"Failed to update records in table '{table}'. Error: {e}")
+            logger.error(f"Failed to update records. Error: {e}")
             raise
 
     def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> None:
@@ -270,8 +177,8 @@ class PostgresqlGenericCRUD:
             query += f" WHERE {where}"
         try:
             self.db_client.execute_query(query, params)
-            logger.info(f"Records deleted from table '{table}'.")
+            logger.info("Records deleted")
             return True
         except Exception as e:
-            logger.error(f"Failed to delete records from table '{table}'. Error: {e}")
+            logger.error(f"Failed to delete records. Error: {e}")
             raise

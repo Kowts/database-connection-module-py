@@ -2,7 +2,7 @@ import json
 import pyodbc
 import logging
 import queue
-from .utils import retry
+from utils import retry_etl
 from .base_database import BaseDatabase, DatabaseConnectionError
 import threading
 import time
@@ -72,7 +72,7 @@ class SQLServerClient(BaseDatabase):
             logger.error(f"Error creating new SQL Server Database connection: {err}")
             raise DatabaseConnectionError(err)
 
-    @retry(max_retries=5, delay=10, backoff=2, exceptions=(pyodbc.Error,), logger=logger)
+    @retry_etl(max_retries=5, delay=10, backoff=2, exceptions=(pyodbc.Error,), logger=logger)
     def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_as_dict: bool = False, timeout: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
         """
         Execute a SQL Server query with retry and timeout handling.

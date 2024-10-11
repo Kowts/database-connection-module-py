@@ -2,7 +2,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import date, datetime
-from .utils import retry
+from utils import retry_etl
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,23 @@ class OracleGenericCRUD:
             db_client: An instance of a database client (e.g., OracleClient).
         """
         self.db_client = db_client
+
+    def ensure_tuple(self, values: List[Any]) -> List[Tuple[Any]]:
+        """
+        Ensure that all items in the values list are tuples. If an item is a list, convert it to a tuple.
+
+        Args:
+            values (list): List of values that need to be tuples.
+
+        Returns:
+            list of tuples: All items in the list are converted to tuples if they aren't already.
+        """
+        if not isinstance(values, list):
+            # If values is not a list, wrap it in a list
+            values = [values]
+
+        # Convert all items in the list to tuples if they are not already tuples
+        return [tuple(v) if not isinstance(v, tuple) else v for v in values]
 
     def _get_table_columns(self, table: str, show_id: bool = False) -> List[str]:
         """
@@ -162,7 +179,7 @@ class OracleGenericCRUD:
             logger.error(f"Failed to create table '{table}'. Error: {str(e)}")
             raise
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None, primary_key: str = None) -> bool:
         """
         Create new records in the specified table.
@@ -176,14 +193,12 @@ class OracleGenericCRUD:
         Returns:
             bool: True if records were inserted successfully, False otherwise.
         """
+
         if columns is None:
             columns = self._get_table_columns(table)
 
-        # Ensure values is a list of tuples
-        if not isinstance(values, list):
-            values = [values]
-        elif not all(isinstance(v, tuple) for v in values):
-            raise ValueError("Values must be a tuple or a list of tuples.")
+        # Ensure all values are tuples
+        values = self.ensure_tuple(values)
 
         # Create the table if it doesn't exist
         self.create_table_if_not_exists(table, columns, values, primary_key)
@@ -204,7 +219,7 @@ class OracleGenericCRUD:
             logger.error(f"Failed to insert records. Error: {e}")
             return False
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False, batch_size: int = None) -> List[Dict[str, Any]]:
         """
         Read records from the specified table with optional batch support.
@@ -239,7 +254,7 @@ class OracleGenericCRUD:
             logger.error(f"Failed to read records. Error: {e}")
             raise
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> bool:
         """
         Update records in the specified table.
@@ -264,7 +279,7 @@ class OracleGenericCRUD:
             logger.error(f"Failed to update records. Error: {e}")
             return False
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def delete(self, table: str, where: str = "", params: Tuple[Any] = None) -> bool:
         """
         Delete records from the specified table.
@@ -288,6 +303,34 @@ class OracleGenericCRUD:
         except Exception as e:
             logger.error(f"Failed to delete records. Error: {e}")
             return False
+
+    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Optional[List[Dict[str, Any]]]:
+        """
+        Execute a raw SQL query.
+
+        Args:
+            query (str): The SQL query to execute.
+            params (dict, optional): Dictionary of parameters to bind to the query. Default is None.
+
+        Returns:
+            Optional[list]: If the query is a SELECT query, returns a list of dictionaries representing rows with formatted date fields. Otherwise, returns None.
+        """
+        try:
+            is_select_query = query.strip().lower().startswith('select')
+            if is_select_query:
+                # Execute the SELECT query and get results as a list of dictionaries
+                result = self.db_client.execute_query(query, params, fetch_as_dict=True)
+                # Format dates in each record
+                formatted_result = [self._format_dates(record) for record in result]
+                return formatted_result
+            else:
+                # Execute the non-SELECT query
+                self.db_client.execute_query(query, params)
+                logger.info("Query executed successfully.")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to execute raw query. Error: {e}")
+            raise
 
     def begin_transaction(self):
         """Begin a transaction."""

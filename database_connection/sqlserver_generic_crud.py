@@ -2,7 +2,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import date, datetime
-from .utils import retry
+from utils import retry_etl
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,23 @@ class SQLServerGenericCRUD:
             db_client: An instance of a database client (e.g., SQLServerClient).
         """
         self.db_client = db_client
+
+    def ensure_tuple(self, values: List[Any]) -> List[Tuple[Any]]:
+        """
+        Ensure that all items in the values list are tuples. If an item is a list, convert it to a tuple.
+
+        Args:
+            values (list): List of values that need to be tuples.
+
+        Returns:
+            list of tuples: All items in the list are converted to tuples if they aren't already.
+        """
+        if not isinstance(values, list):
+            # If values is not a list, wrap it in a list
+            values = [values]
+
+        # Convert all items in the list to tuples if they are not already tuples
+        return [tuple(v) if not isinstance(v, tuple) else v for v in values]
 
     def _get_table_columns(self, table: str, show_id: bool = False) -> List[str]:
         """
@@ -152,7 +169,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to create table '{table}'. Error: {e}")
             raise
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None, primary_key: str = None) -> bool:
         """
         Create new records in the specified table.
@@ -165,24 +182,28 @@ class SQLServerGenericCRUD:
         Returns:
             bool: True if records were inserted successfully, False otherwise.
         """
+
+        # Ensure all values are tuples
+        values = self.ensure_tuple(values)
+
+        # Get columns if not provided
         if columns is None:
             columns = self._get_table_columns(table)
 
-        if not isinstance(values, list):
-            values = [values]
-        elif not all(isinstance(v, tuple) for v in values):
-            raise ValueError("Values must be a tuple or a list of tuples.")
-
+        # Ensure the table exists, create if necessary
         self.create_table_if_not_exists(table, columns, values, primary_key=primary_key)
 
+        # Validate that the number of columns matches the number of values
         for value_tuple in values:
             if len(value_tuple) != len(columns):
                 raise ValueError(f"Number of values {len(value_tuple)} does not match number of columns {len(columns)}")
 
+        # Prepare the SQL insert query
         columns_str = ", ".join(columns)
         placeholders = ", ".join(["?" for _ in columns])
         query = f"INSERT INTO {table} ({columns_str}) VALUES ({placeholders})"
 
+        # Execute the query in bulk
         try:
             self.db_client.execute_batch_query(query, values)
             logger.info("Records inserted")
@@ -191,7 +212,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to insert records. Error: {e}")
             return False
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False, batch_size: int = None) -> List[Dict[str, Any]]:
         """
         Read records from the specified table with optional batch support.
@@ -226,7 +247,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to read records. Error: {e}")
             raise
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> bool:
         """
         Update records in the specified table.
@@ -251,7 +272,7 @@ class SQLServerGenericCRUD:
             logger.error(f"Failed to update records. Error: {e}")
             return False
 
-    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def delete(self, table: str, where: str = "", params: Tuple[Any] = None, batch_size: int = None) -> bool:
         """
         Delete records from the specified table with optional batch processing.
