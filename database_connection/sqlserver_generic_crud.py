@@ -77,6 +77,47 @@ class SQLServerGenericCRUD:
                 record[key] = value.strftime('%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
         return record
 
+    def diagnose_column_lengths(self, table: str, values: List[Tuple[Any]]) -> Dict[str, Tuple[int, int]]:
+        """
+        Diagnose column length issues by comparing the maximum length of values
+        with the defined length in the database schema.
+
+        Args:
+            table (str): The name of the table to diagnose.
+            values (List[Tuple[Any]]): The values being inserted.
+
+        Returns:
+            Dict[str, Tuple[int, int]]: A dictionary with column names as keys and tuples
+            of (max_value_length, defined_column_length) as values for problematic columns.
+        """
+        # Get the column information from the database
+        column_info_query = f"""
+        SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = ?
+        """
+        column_info = self.db_client.execute_query(column_info_query, (table,), fetch_as_dict=True)
+
+        # Create a dictionary of column names to their defined lengths
+        defined_lengths = {col['COLUMN_NAME']: col['CHARACTER_MAXIMUM_LENGTH'] for col in column_info}
+
+        # Get the column names for the table
+        columns = self._get_table_columns(table)
+
+        # Calculate the maximum length of each value in the data
+        max_lengths = {}
+        for i, column in enumerate(columns):
+            max_lengths[column] = max(len(str(row[i])) for row in values if row[i] is not None)
+
+        # Identify problematic columns
+        problematic_columns = {}
+        for column, max_length in max_lengths.items():
+            defined_length = defined_lengths.get(column)
+            if defined_length is not None and max_length > defined_length:
+                problematic_columns[column] = (max_length, defined_length)
+
+        return problematic_columns
+
     def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str], primary_key: str = None) -> Dict[str, str]:
         """
         Infer column data types based on the values provided, considering multiple rows for better accuracy.
@@ -175,12 +216,13 @@ class SQLServerGenericCRUD:
         Create new records in the specified table.
 
         Args:
-            table (str): The table name.
-            values (list of tuples): List of tuples of values to insert.
-            columns (list, optional): List of column names. If None, columns will be inferred from the table schema.
+        table (str): The table name.
+        values (list of tuples): List of tuples of values to insert.
+        columns (list, optional): List of column names. If None, columns will be inferred from the table schema.
+        primary_key (str, optional): The primary key column name.
 
         Returns:
-            bool: True if records were inserted successfully, False otherwise.
+        bool: True if records were inserted successfully, False otherwise.
         """
 
         # Ensure all values are tuples
@@ -198,6 +240,13 @@ class SQLServerGenericCRUD:
             if len(value_tuple) != len(columns):
                 raise ValueError(f"Number of values {len(value_tuple)} does not match number of columns {len(columns)}")
 
+        # Diagnose potential column length issues
+        problematic_columns = self.diagnose_column_lengths(table, values)
+        if problematic_columns:
+            logger.warning(f"Potential column length issues detected: {problematic_columns}")
+            for column, (max_length, defined_length) in problematic_columns.items():
+                logger.warning(f"Column '{column}' has values up to {max_length} characters long, but is defined as VARCHAR({defined_length})")
+
         # Prepare the SQL insert query
         columns_str = ", ".join(columns)
         placeholders = ", ".join(["?" for _ in columns])
@@ -210,6 +259,8 @@ class SQLServerGenericCRUD:
             return True
         except Exception as e:
             logger.error(f"Failed to insert records. Error: {e}")
+            if problematic_columns:
+                logger.error(f"This error may be related to the column length issues detected earlier: {problematic_columns}")
             return False
 
     @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
