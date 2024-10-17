@@ -77,6 +77,30 @@ class SQLServerGenericCRUD:
                 record[key] = value.strftime('%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
         return record
 
+    @retry_etl(max_retries=3, delay=2, backoff=1.5, exceptions=(Exception,), logger=logger)
+    def table_exists(self, table: str) -> bool:
+        """
+        Check if a table exists in the database.
+
+        Args:
+            table (str): The name of the table to check.
+
+        Returns:
+            bool: True if the table exists, False otherwise.
+        """
+        query = """
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_NAME = ?
+        """
+
+        try:
+            result = self.db_client.execute_query(query, (table,), fetch_as_dict=False)
+            return result[0][0] > 0
+        except Exception as e:
+            logger.error(f"Failed to check if table '{table}' exists. Error: {e}")
+            raise
+
     def diagnose_column_lengths(self, table: str, values: List[Tuple[Any]]) -> Dict[str, Tuple[int, int]]:
         """
         Diagnose column length issues by comparing the maximum length of values
@@ -337,6 +361,12 @@ class SQLServerGenericCRUD:
         Returns:
             bool: True if records were deleted successfully, False otherwise.
         """
+
+        # Check if the table exists before attempting to delete
+        if not self.table_exists(table):
+            logger.warning(f"Table '{table}' does not exist. Delete operation aborted.")
+            return False
+
         query = f"DELETE FROM {table}"
         if where:
             query += f" WHERE {where}"
