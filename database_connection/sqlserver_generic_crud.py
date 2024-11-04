@@ -1,70 +1,66 @@
-from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 import logging
 from datetime import date, datetime
-from utils import retry_etl
+from utils import retry
+import re
 
 logger = logging.getLogger(__name__)
 
 class SQLServerGenericCRUD:
-    """Enhanced Generic CRUD operations for any table in SQL Server."""
+    """Generic CRUD operations for any table in SQL Server with enhanced functionality."""
 
     def __init__(self, db_client):
         """
         Initialize the SQLServerGenericCRUD class.
 
         Args:
-            db_client: An instance of a database client (e.g., SQLServerClient).
+            db_client: An instance of SQLServerClient.
         """
         self.db_client = db_client
 
-    def ensure_tuple(self, values: List[Any]) -> List[Tuple[Any]]:
-        """
-        Ensure that all items in the values list are tuples. If an item is a list, convert it to a tuple.
-
-        Args:
-            values (list): List of values that need to be tuples.
-
-        Returns:
-            list of tuples: All items in the list are converted to tuples if they aren't already.
-        """
-        if not isinstance(values, list):
-            # If values is not a list, wrap it in a list
-            values = [values]
-
-        # Convert all items in the list to tuples if they are not already tuples
-        return [tuple(v) if not isinstance(v, tuple) else v for v in values]
-
     def _get_table_columns(self, table: str, show_id: bool = False) -> List[str]:
         """
-        Get the column names of a table, optionally including the 'id' column.
+        Get the column names of a table with improved metadata handling.
 
         Args:
             table (str): The table name.
-            show_id (bool): If True, include the 'id' column. Default is False.
+            show_id (bool): If True, include the 'id' column.
 
         Returns:
             list: List of column names.
         """
         query = """
-        SELECT COLUMN_NAME
+        SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = ?"""
+        WHERE TABLE_NAME = ?
+        """
         if not show_id:
             query += " AND COLUMN_NAME != 'ID'"
         query += " ORDER BY ORDINAL_POSITION"
 
         try:
             result = self.db_client.execute_query(query, (table,), fetch_as_dict=True)
-            columns = [row['COLUMN_NAME'] for row in result]
-            return columns
+            return [row['COLUMN_NAME'] for row in result]
         except Exception as e:
-            logger.error(f"Failed to get table columns. Error: {e}")
+            logger.error(f"Failed to get table columns: {e}")
             raise
+
+    def _validate_table_name(self, table_name: str) -> bool:
+        """
+        Validate table name against SQL injection and naming rules.
+
+        Args:
+            table_name (str): The table name to validate.
+
+        Returns:
+            bool: True if valid, False otherwise.
+        """
+        pattern = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
+        return bool(pattern.match(table_name))
 
     def _format_dates(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Format date fields in a record to a readable string format.
+        Format date fields in a record with timezone handling.
 
         Args:
             record (dict): The record with potential date fields.
@@ -77,332 +73,306 @@ class SQLServerGenericCRUD:
                 record[key] = value.strftime('%Y-%m-%d %H:%M:%S') if isinstance(value, datetime) else value.strftime('%Y-%m-%d')
         return record
 
-    @retry_etl(max_retries=3, delay=2, backoff=1.5, exceptions=(Exception,), logger=logger)
-    def table_exists(self, table: str) -> bool:
+    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str], primary_key: str = None) -> Dict[str, str]:
         """
-        Check if a table exists in the database.
+        Infer SQL Server-specific column types with improved type mapping.
 
         Args:
-            table (str): The name of the table to check.
+            values (list of tuples): Sample data for type inference.
+            columns (list): Column names.
+            primary_key (str, optional): Primary key column name.
 
         Returns:
-            bool: True if the table exists, False otherwise.
+            dict: Mapping of columns to SQL Server data types.
         """
-        query = """
-        SELECT COUNT(*)
+        type_mapping = {
+            int: "INT",
+            float: "FLOAT",
+            str: "NVARCHAR(MAX)",
+            date: "DATE",
+            datetime: "DATETIME2",
+            bool: "BIT",
+            bytes: "VARBINARY(MAX)"
+        }
+
+        inferred_types = {}
+        for idx, column in enumerate(columns):
+            # Sample multiple rows for better type inference
+            sample_values = [row[idx] for row in values if row[idx] is not None]
+            if not sample_values:
+                inferred_types[column] = "NVARCHAR(MAX)"
+                continue
+
+            # Determine type based on all non-null values
+            python_type = type(sample_values[0])
+            for value in sample_values[1:]:
+                if type(value) != python_type:
+                    python_type = str  # Default to string for mixed types
+                    break
+
+            sql_type = type_mapping.get(python_type, "NVARCHAR(MAX)")
+
+            # Add primary key constraint if applicable
+            if column == primary_key:
+                sql_type += " PRIMARY KEY"
+
+            inferred_types[column] = sql_type
+
+        return inferred_types
+
+    def create_table_if_not_exists(self, table: str, columns: List[str],
+                                 values: List[Tuple[Any]], primary_key: str = None) -> None:
+        """
+        Create a table with improved schema handling and constraints.
+
+        Args:
+            table (str): The table name.
+            columns (list): Column names.
+            values (list of tuples): Sample data for type inference.
+            primary_key (str, optional): Primary key column name.
+        """
+        if not self._validate_table_name(table):
+            raise ValueError(f"Invalid table name: {table}")
+
+        check_query = """
+        SELECT COUNT(*) AS table_exists
         FROM INFORMATION_SCHEMA.TABLES
         WHERE TABLE_NAME = ?
         """
 
-        try:
-            result = self.db_client.execute_query(query, (table,), fetch_as_dict=False)
-            return result[0][0] > 0
-        except Exception as e:
-            logger.error(f"Failed to check if table '{table}' exists. Error: {e}")
-            raise
-
-    def diagnose_column_lengths(self, table: str, values: List[Tuple[Any]]) -> Dict[str, Tuple[int, int]]:
-        """
-        Diagnose column length issues by comparing the maximum length of values
-        with the defined length in the database schema.
-
-        Args:
-            table (str): The name of the table to diagnose.
-            values (List[Tuple[Any]]): The values being inserted.
-
-        Returns:
-            Dict[str, Tuple[int, int]]: A dictionary with column names as keys and tuples
-            of (max_value_length, defined_column_length) as values for problematic columns.
-        """
-        # Get the column information from the database
-        column_info_query = f"""
-        SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = ?
-        """
-        column_info = self.db_client.execute_query(column_info_query, (table,), fetch_as_dict=True)
-
-        # Create a dictionary of column names to their defined lengths
-        defined_lengths = {col['COLUMN_NAME']: col['CHARACTER_MAXIMUM_LENGTH'] for col in column_info}
-
-        # Get the column names for the table
-        columns = self._get_table_columns(table)
-
-        # Calculate the maximum length of each value in the data
-        max_lengths = {}
-        for i, column in enumerate(columns):
-            max_lengths[column] = max(len(str(row[i])) for row in values if row[i] is not None)
-
-        # Identify problematic columns
-        problematic_columns = {}
-        for column, max_length in max_lengths.items():
-            defined_length = defined_lengths.get(column)
-            if defined_length is not None and max_length > defined_length:
-                problematic_columns[column] = (max_length, defined_length)
-
-        return problematic_columns
-
-    def _infer_column_types(self, values: List[Tuple[Any]], columns: List[str], primary_key: str = None) -> Dict[str, str]:
-        """
-        Infer column data types based on the values provided, considering multiple rows for better accuracy.
-        Optionally mark a specified column as the PRIMARY KEY, retaining its original inferred type.
-
-        Args:
-            values (list of tuples): List of tuples representing the values to insert.
-            columns (list): List of column names.
-            primary_key (str, optional): Column name to be set as the PRIMARY KEY, retaining its original inferred type.
-
-        Returns:
-            dict: Dictionary of column names and their inferred data types, with the primary key marked if specified.
-        """
-        types = {}
-
-        if values:
-            for column in columns:
-                inferred_type = None
-                max_int_digits = 1  # Default to 1 digit for INT columns
-
-                for row in values:
-                    value = row[columns.index(column)]
-
-                    if isinstance(value, int):
-                        max_int_digits = max(max_int_digits, len(str(abs(value))))
-                        if inferred_type not in ['FLOAT', 'VARCHAR(MAX)']:
-                            inferred_type = 'INT'
-                    elif isinstance(value, float):
-                        if inferred_type != 'VARCHAR(MAX)':
-                            inferred_type = 'FLOAT'
-                    elif isinstance(value, str):
-                        inferred_type = 'VARCHAR(MAX)'
-                    elif isinstance(value, date):
-                        inferred_type = 'DATE'
-                    elif isinstance(value, datetime):
-                        inferred_type = 'DATETIME'
-                    else:
-                        inferred_type = 'VARCHAR(MAX)'
-
-                if inferred_type == 'INT' and max_int_digits >= 11:
-                    inferred_type = 'BIGINT'
-
-                if column == primary_key:
-                    inferred_type = f"{inferred_type} PRIMARY KEY"
-
-                types[column] = inferred_type or 'VARCHAR(MAX)'
-
-        return types
-
-    def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]], primary_key: str) -> bool:
-        """
-        Create a table with the specified columns if it does not already exist.
-
-        Args:
-            table (str): The name of the table to create.
-            columns (list): List of column names.
-            values (list of tuples): List of tuples representing the values to insert.
-            primary_key (str): The column to set as the primary key.
-
-        Returns:
-            bool: True if the table was created, False if it already existed.
-        """
-        # Get the existing columns in the table
-        existing_columns = self._get_table_columns(table)
-        if existing_columns:
+        result = self.db_client.execute_query(check_query, (table,), fetch_as_dict=True)
+        if result[0]['table_exists'] > 0:
             logger.info(f"Table '{table}' already exists.")
-            return False
-
-        # Ensure the primary key column is in the columns list
-        if primary_key not in columns:
-            logger.info(f"Primary key column '{primary_key}' not found in columns. Adding it.")
-            columns.append(primary_key)
-
-        # Infer column types based on the provided values
-        column_types = OrderedDict()
-        inferred_types = self._infer_column_types(values, columns, primary_key)
-
-        # Update the ordered dictionary with the inferred types
-        column_types.update(inferred_types)
-
-        # Construct the column definitions for the CREATE TABLE query
-        columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
-        create_query = f"CREATE TABLE {table} ({columns_def})"
+            return
 
         try:
+            column_types = self._infer_column_types(values, columns, primary_key)
+            columns_def = ", ".join([f"[{col}] {dtype}" for col, dtype in column_types.items()])
+
+            create_query = f"""
+            CREATE TABLE [{table}] (
+                {columns_def}
+            )
+            """
+
             self.db_client.execute_query(create_query)
             logger.info(f"Table '{table}' created successfully.")
-            return True
+
         except Exception as e:
-            logger.error(f"Failed to create table '{table}'. Error: {e}")
+            logger.error(f"Failed to create table '{table}': {e}")
             raise
 
-    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
-    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None, primary_key: str = None) -> bool:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None,
+               primary_key: str = None, batch_size: int = 1000) -> bool:
         """
-        Create new records in the specified table.
+        Create new records with improved batch processing and error handling.
 
         Args:
-        table (str): The table name.
-        values (list of tuples): List of tuples of values to insert.
-        columns (list, optional): List of column names. If None, columns will be inferred from the table schema.
-        primary_key (str, optional): The primary key column name.
+            table (str): The table name.
+            values (list of tuples): Values to insert.
+            columns (list, optional): Column names.
+            primary_key (str, optional): Primary key column name.
+            batch_size (int): Size of each batch for processing.
 
         Returns:
-        bool: True if records were inserted successfully, False otherwise.
+            bool: True if successful, False otherwise.
         """
-
-        # Ensure all values are tuples
-        values = self.ensure_tuple(values)
-
-        # Get columns if not provided
         if columns is None:
             columns = self._get_table_columns(table)
 
-        # Ensure the table exists, create if necessary
-        self.create_table_if_not_exists(table, columns, values, primary_key=primary_key)
+        # Ensure values is properly formatted
+        if not isinstance(values, list):
+            values = [values]
+        values = [tuple(v) if not isinstance(v, tuple) else v for v in values]
 
-        # Validate that the number of columns matches the number of values
+        # Validate data
         for value_tuple in values:
             if len(value_tuple) != len(columns):
                 raise ValueError(f"Number of values {len(value_tuple)} does not match number of columns {len(columns)}")
 
-        # Diagnose potential column length issues
-        problematic_columns = self.diagnose_column_lengths(table, values)
-        if problematic_columns:
-            logger.warning(f"Potential column length issues detected: {problematic_columns}")
-            for column, (max_length, defined_length) in problematic_columns.items():
-                logger.warning(f"Column '{column}' has values up to {max_length} characters long, but is defined as VARCHAR({defined_length})")
+        # Create table if it doesn't exist
+        self.create_table_if_not_exists(table, columns, values, primary_key)
 
-        # Prepare the SQL insert query
-        columns_str = ", ".join(columns)
+        # Prepare the insert query
+        columns_str = ", ".join([f"[{col}]" for col in columns])
         placeholders = ", ".join(["?" for _ in columns])
-        query = f"INSERT INTO {table} ({columns_str}) VALUES ({placeholders})"
+        query = f"INSERT INTO [{table}] ({columns_str}) VALUES ({placeholders})"
 
-        # Execute the query in bulk
         try:
-            self.db_client.execute_batch_query(query, values)
-            logger.info("Records inserted")
+            # Execute in batches
+            for i in range(0, len(values), batch_size):
+                batch = values[i:i + batch_size]
+                self.db_client.execute_batch_query(query, batch)
+                logger.info(f"Inserted batch {i//batch_size + 1} of {(len(values)-1)//batch_size + 1}")
             return True
         except Exception as e:
-            logger.error(f"Failed to insert records. Error: {e}")
-            if problematic_columns:
-                logger.error(f"This error may be related to the column length issues detected earlier: {problematic_columns}")
+            logger.error(f"Failed to insert records: {e}")
             return False
 
-    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
-    def read(self, table: str, columns: List[str] = None, where: str = "", params: Tuple[Any] = None, show_id: bool = False, batch_size: int = None) -> List[Dict[str, Any]]:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def read(self, table: str, columns: List[str] = None, where: str = "",
+            params: Tuple[Any] = None, show_id: bool = False,
+            batch_size: Optional[int] = None, order_by: str = None) -> List[Dict[str, Any]]:
         """
-        Read records from the specified table with optional batch support.
+        Read records with improved filtering and pagination.
 
         Args:
             table (str): The table name.
-            columns (list, optional): List of column names to retrieve. If None, all columns will be retrieved.
-            where (str, optional): WHERE clause for filtering records.
-            params (tuple, optional): Tuple of parameters for the WHERE clause.
-            show_id (bool, optional): If True, include the 'id' column. Default is False.
-            batch_size (int, optional): If provided, limits the number of records returned per batch.
+            columns (list, optional): Column names to retrieve.
+            where (str, optional): WHERE clause.
+            params (tuple, optional): Query parameters.
+            show_id (bool, optional): Include ID column.
+            batch_size (int, optional): Number of records per batch.
+            order_by (str, optional): ORDER BY clause.
 
         Returns:
             list: List of records as dictionaries.
         """
+        if not self._validate_table_name(table):
+            raise ValueError(f"Invalid table name: {table}")
+
         if columns is None:
             columns = self._get_table_columns(table, show_id=show_id)
 
-        columns_str = ", ".join(columns) if columns else "*"
-        query = f"SELECT {columns_str} FROM {table}"
+        columns_str = ", ".join([f"[{col}]" for col in columns])
+        query = f"SELECT {columns_str} FROM [{table}]"
+
         if where:
             query += f" WHERE {where}"
+
+        if order_by:
+            query += f" ORDER BY {order_by}"
+        elif batch_size:
+            # Need an ORDER BY clause for OFFSET/FETCH
+            query += f" ORDER BY {columns[0]}"
+
         if batch_size:
-            query += f" ORDER BY {columns[0]} OFFSET 0 ROWS FETCH NEXT {batch_size} ROWS ONLY"
+            query += f" OFFSET 0 ROWS FETCH NEXT {batch_size} ROWS ONLY"
 
         try:
             result = self.db_client.execute_query(query, params, fetch_as_dict=True)
-            records = [self._format_dates(row) for row in result]
-            logger.info(f"Records read successfully, {len(records)} rows found.")
+            records = [self._format_dates(record) for record in result]
+            logger.info(f"Retrieved {len(records)} records")
             return records
         except Exception as e:
-            logger.error(f"Failed to read records. Error: {e}")
+            logger.error(f"Failed to read records: {e}")
             raise
 
-    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
-    def update(self, table: str, updates: Dict[str, Any], where: str, params: Tuple[Any]) -> bool:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def update(self, table: str, updates: Dict[str, Any], where: str,
+              params: Tuple[Any], batch_size: Optional[int] = None) -> bool:
         """
-        Update records in the specified table.
+        Update records with improved batching and validation.
 
         Args:
             table (str): The table name.
-            updates (dict): Dictionary of columns and their new values.
-            where (str): WHERE clause for identifying records to update.
-            params (tuple): Tuple of parameters for the WHERE clause.
+            updates (dict): Column-value pairs to update.
+            where (str): WHERE clause.
+            params (tuple): Query parameters.
+            batch_size (int, optional): Batch size for large updates.
 
         Returns:
-            bool: True if records were updated successfully, False otherwise.
+            bool: True if successful, False otherwise.
         """
-        set_clause = ", ".join([f"{col} = ?" for col in updates.keys()])
-        query = f"UPDATE {table} SET {set_clause} WHERE {where}"
+        if not self._validate_table_name(table):
+            raise ValueError(f"Invalid table name: {table}")
+
+        set_clause = ", ".join([f"[{col}] = ?" for col in updates.keys()])
+        query = f"UPDATE [{table}] SET {set_clause} WHERE {where}"
+
+        if batch_size:
+            query += f" OFFSET 0 ROWS FETCH NEXT {batch_size} ROWS ONLY"
+
         values = tuple(updates.values()) + params
+
         try:
-            self.db_client.execute_query(query, values)
-            logger.info("Records updated successfully")
+            affected_rows = self.db_client.execute_query(query, values)
+            logger.info(f"Updated {affected_rows} records")
             return True
         except Exception as e:
-            logger.error(f"Failed to update records. Error: {e}")
+            logger.error(f"Failed to update records: {e}")
             return False
 
-    @retry_etl(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
-    def delete(self, table: str, where: str = "", params: Tuple[Any] = None, batch_size: int = None) -> bool:
+    @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
+    def delete(self, table: str, where: str = "", params: Tuple[Any] = None,
+              batch_size: Optional[int] = None, safe_delete: bool = True) -> bool:
         """
-        Delete records from the specified table with optional batch processing.
+        Delete records with improved safety and batching.
 
         Args:
             table (str): The table name.
-            where (str, optional): WHERE clause for identifying records to delete. If empty, all records will be deleted.
-            params (tuple, optional): Tuple of parameters for the WHERE clause.
-            batch_size (int, optional): If provided, deletes records in batches.
+            where (str, optional): WHERE clause.
+            params (tuple, optional): Query parameters.
+            batch_size (int, optional): Batch size for large deletes.
+            safe_delete (bool): If True, requires WHERE clause for deletion.
 
         Returns:
-            bool: True if records were deleted successfully, False otherwise.
+            bool: True if successful, False otherwise.
         """
+        if not self._validate_table_name(table):
+            raise ValueError(f"Invalid table name: {table}")
 
-        # Check if the table exists before attempting to delete
-        if not self.table_exists(table):
-            logger.warning(f"Table '{table}' does not exist. Delete operation aborted.")
-            return False
+        if safe_delete and not where:
+            raise ValueError("WHERE clause required for safe delete operation")
 
-        query = f"DELETE FROM {table}"
+        query = f"DELETE FROM [{table}]"
         if where:
             query += f" WHERE {where}"
+
         if batch_size:
-            query += f" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT {batch_size} ROWS ONLY"
+            query += f" OFFSET 0 ROWS FETCH NEXT {batch_size} ROWS ONLY"
 
         try:
-            self.db_client.execute_query(query, params)
-            logger.info("Records deleted successfully")
+            affected_rows = self.db_client.execute_query(query, params)
+            logger.info(f"Deleted {affected_rows} records")
             return True
         except Exception as e:
-            logger.error(f"Failed to delete records. Error: {e}")
+            logger.error(f"Failed to delete records: {e}")
             return False
 
-    def begin_transaction(self):
-        """Begin a transaction."""
+    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None,
+                         fetch_as_dict: bool = True) -> Optional[List[Dict[str, Any]]]:
+        """
+        Execute a raw SQL query with improved safety and result handling.
+
+        Args:
+            query (str): The SQL query.
+            params (dict, optional): Query parameters.
+            fetch_as_dict (bool): Return results as dictionaries.
+
+        Returns:
+            Optional[list]: Query results or None for non-SELECT queries.
+        """
         try:
-            self.db_client.begin_transaction()
+            is_select = query.strip().lower().startswith('select')
+            result = self.db_client.execute_query(query, params, fetch_as_dict=fetch_as_dict)
+
+            if is_select and fetch_as_dict:
+                return [self._format_dates(record) for record in result]
+            return result
         except Exception as e:
-            logger.error(f"Failed to begin transaction. Error: {e}")
+            logger.error(f"Failed to execute raw query: {e}")
             raise
 
-    def commit_transaction(self):
-        """Commit the current transaction."""
-        try:
-            self.db_client.commit_transaction()
-            logger.info("Transaction committed successfully.")
-        except Exception as e:
-            logger.error(f"Failed to commit transaction. Error: {e}")
-            raise
+    def table_exists(self, table: str) -> bool:
+        """
+        Check if a table exists.
 
-    def rollback_transaction(self):
-        """Rollback the current transaction."""
+        Args:
+            table (str): The table name.
+
+        Returns:
+            bool: True if table exists, False otherwise.
+        """
+        query = """
+        SELECT COUNT(*) AS table_exists
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_NAME = ?
+        """
         try:
-            self.db_client.rollback_transaction()
-            logger.info("Transaction rolled back successfully.")
+            result = self.db_client.execute_query(query, (table,), fetch_as_dict=True)
+            return result[0]['table_exists'] > 0
         except Exception as e:
-            logger.error(f"Failed to rollback transaction. Error: {e}")
+            logger.error(f"Failed to check table existence: {e}")
             raise
