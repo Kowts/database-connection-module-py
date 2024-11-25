@@ -165,9 +165,9 @@ class SQLServerGenericCRUD:
 
     @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def create(self, table: str, values: List[Tuple[Any]], columns: List[str] = None,
-               primary_key: str = None, batch_size: int = 1000) -> bool:
+            primary_key: str = None, batch_size: int = 1000) -> bool:
         """
-        Create new records with progress bar visualization.
+        Create new records with clean progress bar visualization.
 
         Args:
             table (str): The table name.
@@ -200,19 +200,25 @@ class SQLServerGenericCRUD:
         placeholders = ", ".join(["?" for _ in columns])
         query = f"INSERT INTO [{table}] ({columns_str}) VALUES ({placeholders})"
 
-        try:
-            total_batches = (len(values) - 1) // batch_size + 1
+        # Disable logging temporarily to avoid interference with tqdm
+        logger.disabled = True
 
+        try:
+            # Process in batches with a single progress bar
             with tqdm(total=len(values), desc="Inserting records", unit="records") as pbar:
                 for i in range(0, len(values), batch_size):
                     batch = values[i:i + batch_size]
                     self.db_client.execute_batch_query(query, batch)
                     pbar.update(len(batch))
-
             return True
+
         except Exception as e:
+            logger.disabled = False  # Re-enable logging
             logger.error(f"Failed to insert records: {e}")
             return False
+
+        finally:
+            logger.disabled = False  # Make sure logging is re-enabled
 
     @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
     def read(self, table: str, columns: List[str] = None, where: str = "",

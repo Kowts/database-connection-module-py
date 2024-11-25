@@ -210,7 +210,7 @@ class SQLServerClient(BaseDatabase):
 
     def execute_batch_query(self, query: str, values: List[tuple], batch_size: int = 1000):
         """
-        Execute a batch of SQL Server queries.
+        Execute a batch of SQL Server queries without progress logging.
 
         Args:
             query: SQL query to execute
@@ -226,7 +226,6 @@ class SQLServerClient(BaseDatabase):
                     batch = values[i:i + batch_size]
                     cursor.executemany(query, batch)
                     connection.commit()
-                    logger.info(f"Processed batch {i//batch_size + 1} of {(len(values)-1)//batch_size + 1}")
 
             except pyodbc.Error as err:
                 error_msg = f"""
