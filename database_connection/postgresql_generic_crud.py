@@ -4,7 +4,7 @@ from datetime import date, datetime
 import unicodedata
 import pandas as pd
 from tqdm import tqdm
-from helpers.operations import retry
+from utils import retry
 import re
 import json
 
