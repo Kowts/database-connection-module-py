@@ -288,7 +288,6 @@ class PostgresqlGenericCRUD:
         schema_name = table.split('.')[0] if '.' in table else 'dbo'
         table_name = table.split('.')[-1]
 
-
         if not self._validate_table_name(table_name):
             raise ValueError(f"Invalid table name: {table_name}")
 
@@ -297,11 +296,20 @@ class PostgresqlGenericCRUD:
         FROM information_schema.tables
         WHERE table_name = %s
         """
-
-        result = self.db_client.execute_query(check_query, (table_name,), fetch_as_dict=True)
-        if result[0]['table_exists'] > 0:
+        result = self.db_client.execute_query(check_query, (schema_name, table_name), fetch_as_dict=True)
+        table_exists = result[0][0] > 0 if result else False
+        if table_exists:
             logger.info(f"Table '{table_name}' already exists.")
-            return
+            # Return existing column mapping
+            existing_columns_query = """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = ?
+            AND TABLE_NAME = ?
+            """
+            existing_cols = self.db_client.execute_query(existing_columns_query, (schema_name, table_name))
+            existing_mapping = {col: col for col, in existing_cols}
+            return False, existing_mapping
 
         try:
 
@@ -346,6 +354,8 @@ class PostgresqlGenericCRUD:
             """
             self.db_client.execute_query(create_query)
             logger.info(f"Table '{table_name}' created successfully.")
+
+            return True, column_mapping
 
         except Exception as e:
             logger.error(f"Failed to create table '{table_name}': {e}")
@@ -430,12 +440,19 @@ class PostgresqlGenericCRUD:
             if len(value_tuple) != len(columns):
                 raise ValueError(f"Number of values {len(value_tuple)} does not match number of columns {len(columns)}")
 
-        # Create table if it doesn't exist
-        self.create_table_if_not_exists(table, columns, values, primary_key)
+        # Create table if it doesn't exist and get column mapping
+        _, column_mapping = self.create_table_if_not_exists(table, columns, values, primary_key)
+
+        # Get the normalized column names from keys
+        normalized_columns = [col for col in column_mapping.values()]
+
+        # Get valid columns using helper method
+        valid_columns = self._get_valid_columns(table, normalized_columns)
 
         try:
             # Prepare the insert query for execute_values
-            columns_str = ", ".join(columns)
+            columns_str = ", ".join(valid_columns)
+            # columns_str = ", ".join([f"[{col}]" for col in valid_columns])
             query = f"INSERT INTO {table} ({columns_str}) VALUES %s"
 
             # Calculate total batches and log the start of the process
