@@ -1,6 +1,8 @@
 from typing import Any, Dict, List, Optional, Tuple, Union
 import logging
 from datetime import date, datetime
+import unicodedata
+import pandas as pd
 from tqdm import tqdm
 from helpers.operations import retry
 import re
@@ -118,12 +120,158 @@ class PostgresqlGenericCRUD:
             sql_type = type_mapping.get(python_type, "TEXT")
 
             # Add primary key constraint if applicable
-            if column == primary_key:
+            if column == primary_key and primary_key is not None:
                 sql_type = "SERIAL PRIMARY KEY" if python_type == int else f"{sql_type} PRIMARY KEY"
 
             inferred_types[column] = sql_type
 
         return inferred_types
+
+    def normalize_column_name(self, column_name: str, logger: Optional[logging.Logger] = None) -> str:
+        """
+        Enhanced column name normalization that better handles Portuguese characters
+        and special cases for SQL Server compatibility.
+
+        Args:
+            column_name (str): Original column name
+            logger (Optional[logging.Logger]): Logger instance
+
+        Returns:
+            str: Normalized column name suitable for SQL Server
+        """
+        try:
+            # Portuguese character mappings
+            char_mappings = {
+                'á': 'a', 'à': 'a', 'ã': 'a', 'â': 'a', 'ä': 'a',
+                'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+                'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i',
+                'ó': 'o', 'ò': 'o', 'õ': 'o', 'ô': 'o', 'ö': 'o',
+                'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u',
+                'ý': 'y', 'ÿ': 'y',
+                'ñ': 'n',
+                'ç': 'c',
+                '°': '', '²': '2', '³': '3', '€': 'eur',
+                '$': 'dollar', '%': 'percent',
+                '(': '', ')': '', '[': '', ']': '', '{': '', '}': '',
+                '/': '_', '\\': '_', '|': '_', '-': '_', '.': '_'
+            }
+
+            # Common unit indicators to handle specially
+            unit_indicators = {
+                '(KB)': '',
+                '(MB)': '',
+                '(GB)': '',
+                '(TB)': '',
+                '($)': '',
+                '(%)': '',
+                '(#)': ''
+            }
+
+            # Convert to string and lowercase
+            name = str(column_name).lower()
+
+            # Handle unit indicators first
+            for indicator, replacement in unit_indicators.items():
+                if indicator.lower() in name:
+                    name = name.replace(indicator.lower(), replacement)
+
+            # Replace special characters
+            for original, replacement in char_mappings.items():
+                name = name.replace(original, replacement)
+
+            # Remove any remaining diacritics
+            name = ''.join(c for c in unicodedata.normalize('NFKD', name)
+                        if not unicodedata.combining(c))
+
+            # Replace any remaining non-alphanumeric chars with underscore
+            name = re.sub(r'[^a-z0-9_]', '_', name)
+
+            # Replace multiple underscores with single underscore
+            name = re.sub(r'_+', '_', name)
+
+            # Remove leading/trailing underscores
+            name = name.strip('_')
+
+            # Convert to camelCase
+            parts = name.split('_')
+            camel_case = parts[0] + ''.join(p.capitalize() for p in parts[1:])
+
+            # Handle SQL Server reserved words
+            sql_reserved_words = {
+                'add', 'all', 'alter', 'and', 'any', 'as', 'asc', 'backup', 'begin',
+                'between', 'by', 'case', 'check', 'column', 'constraint', 'create',
+                'database', 'default', 'delete', 'desc', 'distinct', 'drop', 'exec',
+                'exists', 'foreign', 'from', 'full', 'group', 'having', 'in', 'index',
+                'inner', 'insert', 'into', 'is', 'join', 'key', 'left', 'like', 'not',
+                'null', 'or', 'order', 'outer', 'primary', 'procedure', 'right', 'rownum',
+                'select', 'set', 'table', 'top', 'truncate', 'union', 'unique', 'update',
+                'values', 'view', 'where', 'date', 'type'
+            }
+
+            if camel_case.lower() in sql_reserved_words:
+                camel_case += 'Col'
+
+            # Ensure name starts with a letter
+            if not camel_case[0].isalpha():
+                camel_case = 'n' + camel_case
+
+            # Truncate to SQL Server's limit
+            camel_case = camel_case[:128]
+
+            if logger:
+                logger.debug(f"Normalized column name: {column_name} -> {camel_case}")
+
+            return camel_case
+
+        except Exception as e:
+            if logger:
+                logger.error(f"Error normalizing column name '{column_name}': {str(e)}")
+            # Return a safe fallback name
+            return f"column_{abs(hash(str(column_name))) % 1000}"
+
+    def normalize_dataframe_columns(self, df: pd.DataFrame, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
+        """
+        Normalize all column names in a DataFrame and handle duplicates intelligently.
+
+        Args:
+            df (pd.DataFrame): Input DataFrame
+            logger (Optional[logging.Logger]): Logger instance
+
+        Returns:
+            pd.DataFrame: DataFrame with normalized column names
+        """
+        try:
+            # Track original to normalized name mapping
+            column_mapping = {}
+            normalized_names = set()
+
+            for original_name in df.columns:
+                normalized_name = self.normalize_column_name(original_name, logger)
+
+                # Handle duplicate normalized names
+                if normalized_name in normalized_names:
+                    # Find the next available number suffix
+                    counter = 1
+                    while f"{normalized_name}{counter}" in normalized_names:
+                        counter += 1
+                    normalized_name = f"{normalized_name}{counter}"
+
+                normalized_names.add(normalized_name)
+                column_mapping[original_name] = normalized_name
+
+            # Log the mapping
+            if logger:
+                logger.info("Column name mapping:")
+                for original, normalized in column_mapping.items():
+                    logger.info(f"  {original} -> {normalized}")
+
+            # Rename the DataFrame columns
+            return df.rename(columns=column_mapping)
+
+        except Exception as e:
+            if logger:
+                logger.error(f"Error normalizing DataFrame columns: {str(e)}")
+            raise
 
     def create_table_if_not_exists(self, table: str, columns: List[str], values: List[Tuple[Any]], primary_key: str = None) -> None:
         """
@@ -135,8 +283,14 @@ class PostgresqlGenericCRUD:
             values (list of tuples): Sample data for type inference.
             primary_key (str, optional): Primary key column name.
         """
-        if not self._validate_table_name(table):
-            raise ValueError(f"Invalid table name: {table}")
+
+        # Split schema and table name
+        schema_name = table.split('.')[0] if '.' in table else 'dbo'
+        table_name = table.split('.')[-1]
+
+
+        if not self._validate_table_name(table_name):
+            raise ValueError(f"Invalid table name: {table_name}")
 
         check_query = """
         SELECT COUNT(*) AS table_exists
@@ -144,26 +298,103 @@ class PostgresqlGenericCRUD:
         WHERE table_name = %s
         """
 
-        result = self.db_client.execute_query(check_query, (table,), fetch_as_dict=True)
+        result = self.db_client.execute_query(check_query, (table_name,), fetch_as_dict=True)
         if result[0]['table_exists'] > 0:
-            logger.info(f"Table '{table}' already exists.")
+            logger.info(f"Table '{table_name}' already exists.")
             return
 
         try:
-            column_types = self._infer_column_types(values, columns, primary_key)
+
+            # Create mapping of original to normalized names
+            column_mapping = {col: self.normalize_column_name(col) for col in columns}
+
+            # Handle duplicate normalized names
+            seen_names = {}
+            for original, normalized in column_mapping.items():
+                if normalized in seen_names:
+                    count = seen_names[normalized] + 1
+                    seen_names[normalized] = count
+                    column_mapping[original] = f"{normalized}{count}"
+                else:
+                    seen_names[normalized] = 1
+
+            # Log the column mapping
+            logger.info("Column name mapping:")
+            for original, normalized in column_mapping.items():
+                logger.info(f"  {original} -> {normalized}")
+
+            # Create list of values with columns in the new order
+            normalized_columns = list(column_mapping.values())
+
+            column_types = self._infer_column_types(values, normalized_columns, primary_key)
             columns_def = ", ".join([f"{col} {dtype}" for col, dtype in column_types.items()])
 
+            # Ensure schema exists
+            create_schema_query = """
+            IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = ?)
+            BEGIN
+                EXEC('CREATE SCHEMA [{schema_name}]')
+            END
+            """
+            self.db_client.execute_query(create_schema_query, (schema_name,))
+
+            # Create table query
             create_query = f"""
-            CREATE TABLE {table} (
+            CREATE TABLE [{schema_name}].[{table_name}] (
                 {columns_def}
             )
             """
-
             self.db_client.execute_query(create_query)
-            logger.info(f"Table '{table}' created successfully.")
+            logger.info(f"Table '{table_name}' created successfully.")
 
         except Exception as e:
-            logger.error(f"Failed to create table '{table}': {e}")
+            logger.error(f"Failed to create table '{table_name}': {e}")
+            raise
+
+    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None,
+                         fetch_as_dict: bool = True) -> Optional[List[Dict[str, Any]]]:
+        """
+        Execute a raw SQL query with improved safety and result handling.
+
+        Args:
+            query (str): The SQL query.
+            params (dict, optional): Query parameters.
+            fetch_as_dict (bool): Return results as dictionaries.
+
+        Returns:
+            Optional[list]: Query results or None for non-SELECT queries.
+        """
+        try:
+            is_select = query.strip().lower().startswith('select')
+            result = self.db_client.execute_query(query, params, fetch_as_dict=fetch_as_dict)
+
+            if is_select and fetch_as_dict:
+                return [self._format_dates(record) for record in result]
+            return result
+        except Exception as e:
+            logger.error(f"Failed to execute raw query: {e}")
+            raise
+
+    def table_exists(self, table: str) -> bool:
+        """
+        Check if a table exists.
+
+        Args:
+            table (str): The table name.
+
+        Returns:
+            bool: True if table exists, False otherwise.
+        """
+        query = """
+        SELECT COUNT(*) AS table_exists
+        FROM information_schema.tables
+        WHERE table_name = %s
+        """
+        try:
+            result = self.db_client.execute_query(query, (table,), fetch_as_dict=True)
+            return result[0]['table_exists'] > 0
+        except Exception as e:
+            logger.error(f"Failed to check table existence: {e}")
             raise
 
     @retry(max_retries=5, delay=5, backoff=2, exceptions=(Exception,), logger=logger)
@@ -354,49 +585,3 @@ class PostgresqlGenericCRUD:
         except Exception as e:
             logger.error(f"Failed to delete records: {e}")
             return False
-
-    def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None,
-                         fetch_as_dict: bool = True) -> Optional[List[Dict[str, Any]]]:
-        """
-        Execute a raw SQL query with improved safety and result handling.
-
-        Args:
-            query (str): The SQL query.
-            params (dict, optional): Query parameters.
-            fetch_as_dict (bool): Return results as dictionaries.
-
-        Returns:
-            Optional[list]: Query results or None for non-SELECT queries.
-        """
-        try:
-            is_select = query.strip().lower().startswith('select')
-            result = self.db_client.execute_query(query, params, fetch_as_dict=fetch_as_dict)
-
-            if is_select and fetch_as_dict:
-                return [self._format_dates(record) for record in result]
-            return result
-        except Exception as e:
-            logger.error(f"Failed to execute raw query: {e}")
-            raise
-
-    def table_exists(self, table: str) -> bool:
-        """
-        Check if a table exists.
-
-        Args:
-            table (str): The table name.
-
-        Returns:
-            bool: True if table exists, False otherwise.
-        """
-        query = """
-        SELECT COUNT(*) AS table_exists
-        FROM information_schema.tables
-        WHERE table_name = %s
-        """
-        try:
-            result = self.db_client.execute_query(query, (table,), fetch_as_dict=True)
-            return result[0]['table_exists'] > 0
-        except Exception as e:
-            logger.error(f"Failed to check table existence: {e}")
-            raise
