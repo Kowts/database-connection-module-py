@@ -1,3 +1,5 @@
+import os
+import sys
 import oracledb
 from .base_database import BaseDatabase, DatabaseConnectionError
 import logging
@@ -21,13 +23,41 @@ class OracleClient(BaseDatabase):
         super().__init__(config)
         self.pool = None
 
+    def initialize_oracle_client(self):
+        """
+        Initializes the Oracle Client depending on the OS.
+        """
+        try:
+            # Windows: Use the Instant Client from Navicat
+            if sys.platform.startswith("win"):
+                if not oracledb.is_thick_mode():
+                    lib_dir = r"C:\Program Files\PremiumSoft\Navicat Premium 16\instantclient_11_2"
+
+                    if os.path.isdir(lib_dir):
+                        oracledb.init_oracle_client(lib_dir=lib_dir)
+                    else:
+                        raise FileNotFoundError(f"Oracle Instant Client not found at: {lib_dir}")
+
+            # Linux/macOS: Use Oracle Instant Client
+            else:
+                lib_dir = "/opt/oracle/instantclient"
+                if os.path.isdir(lib_dir):
+                    oracledb.init_oracle_client(lib_dir=lib_dir)
+                else:
+                    raise FileNotFoundError(f"Oracle Instant Client not found at: {lib_dir}")
+
+            print("✅ Oracle Client initialized successfully.")
+
+        except Exception as e:
+            print(f"⚠️ Error initializing Oracle Client: {e}")
+            sys.exit(1)  # Exit the script if the client cannot be initialized
+
     def connect(self):
         """Establish a connection pool to the Oracle database."""
         try:
 
             # Initialize Oracle client if necessary
-            # Note: init_oracle_client is called automatically by python-oracledb when needed
-            oracledb.init_oracle_client(lib_dir=r"C:\Program Files\PremiumSoft\Navicat Premium 16\instantclient_11_2")
+            self.initialize_oracle_client()
 
             if 'service_name' in self.config:
                 dsn = oracledb.makedsn(self.config['host'], self.config['port'], service_name=self.config['service_name'])
